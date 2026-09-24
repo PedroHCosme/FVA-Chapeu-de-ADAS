@@ -282,8 +282,13 @@ class Car:
 			if lin != -1:
 				break
 
-		# velocidade longitudinal
-		v = self.gear * np.linalg.norm(lin)
+		# velocidade longitudinal: magnitude do corpo, SINAL das rodas.
+		# antes o sinal vinha de self.gear, que so muda em set_ref() -- entao um
+		# set_u(-1) mantido fazia o carro andar de re com v positivo no log.
+		# o yaw da cena tambem nao serve como referencia (ver get_yaw).
+		w_roda = self.sim.getJointVelocity(self.motorL) + self.sim.getJointVelocity(self.motorR)
+		sentido = np.sign(w_roda) if abs(w_roda) > 1e-3 else self.gear
+		v = sentido * np.linalg.norm(lin)
 
 		# filtros
 		v = self.v_filt.filter(v)
