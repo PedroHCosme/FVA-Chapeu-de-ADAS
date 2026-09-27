@@ -1,0 +1,9 @@
+# Saídas geradas pelo capítulo: rode capitulo/figuras.py e compile o .tex
+veiculo_real/capitulo/build/
+veiculo_real/capitulo/figs/
+veiculo_real/capitulo/*.pdf
+
+# Markdown (CLAUDE.md e a documentação local) fica fora do repositório
+*.md
+# exceção: o README vem do repositório do professor
+!/README.md
