@@ -10,12 +10,15 @@
 ########################################
 # GUI Tkinter para envio de arquivos e execução remota em múltiplas Raspberry Pis,
 # com senha SSH padrão (DEFAULT_PASS) pré-preenchida no campo.
-
 import os
 import re
-import shutil
+import posixpath
+import platform
 import subprocess
 import threading
+import stat
+
+import paramiko
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 from matplotlib.figure import Figure
@@ -27,7 +30,6 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 SSH_USER = "alunos"
 DEFAULT_PASS = "fva2023"  # <-- coloque aqui a senha padrão desejada, ex: "rasp123"
 DEFAULT_DEST = "/home/alunos/Desktop/fva"
-RSYNC_OPTS = "-avz --progress"
 
 MACS_CARS = {
 	'verde':    '2c:cf:67:1c:29:4a',
@@ -43,8 +45,39 @@ COLORS = {
 
 CAR_ICON = "🚗 "
 
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+def parse_telemetry_line(line: str):
+	"""Converte uma linha DATA no protocolo oficial da telemetria FVA.
+
+	Formato esperado:
+	DATA,t,x,y,v,vref,a,u,w,th
+	"""
+	clean_line = ANSI_ESCAPE_RE.sub("", line).strip()
+	parts = [p.strip() for p in clean_line.split(",")]
+
+	if len(parts) != 10 or parts[0] != "DATA":
+		raise ValueError(
+			f"esperados 10 campos iniciando por DATA, recebidos {len(parts)}"
+		)
+
+	_, t, x, y, v, vref, a, u, w, th = parts
+
+	return {
+		"t": float(t),
+		"x": float(x),
+		"y": float(y),
+		"v": float(v),
+		"vref": float(vref),
+		"a": float(a),
+		"u": float(u),
+		"w": float(w),
+		"th": float(th),
+	}
+
+
 ########################################
-# Utilitários de rede
+# Utilitários de rede multiplataforma
 ########################################
 def normalize_mac(mac: str) -> str:
 	mac = mac.strip().lower()
@@ -54,17 +87,48 @@ def normalize_mac(mac: str) -> str:
 	return ':'.join(mac[i:i+2] for i in range(0, 12, 2))
 
 ########################################
-def parse_ip_neigh():
+def ping_host(host: str) -> bool:
+	"""Envia um ping curto em Windows, Linux ou macOS."""
+	if platform.system() == "Windows":
+		cmd = ["ping", "-n", "1", "-w", "700", host]
+	else:
+		cmd = ["ping", "-c", "1", "-W", "1", host]
 	try:
-		out = subprocess.check_output(["ip", "neigh"], text=True)
+		return subprocess.run(
+			cmd,
+			stdout=subprocess.DEVNULL,
+			stderr=subprocess.DEVNULL,
+			check=False,
+		).returncode == 0
 	except Exception:
-		return []
+		return False
+
+########################################
+def parse_arp_table():
+	"""Retorna pares (IP, MAC) usando as tabelas ARP disponíveis no SO."""
 	entries = []
-	for line in out.splitlines():
-		m = re.search(r'(\d+\.\d+\.\d+\.\d+)\s+.*lladdr\s+([0-9a-f:]{17})', line.lower())
-		if m:
-			entries.append((m.group(1), m.group(2)))
-	return entries
+	commands = []
+	if platform.system() == "Windows":
+		commands.append(["arp", "-a"])
+	else:
+		commands.extend([["ip", "neigh"], ["arp", "-n"], ["arp", "-a"]])
+
+	for cmd in commands:
+		try:
+			out = subprocess.check_output(cmd, text=True, errors="ignore")
+		except Exception:
+			continue
+
+		for line in out.splitlines():
+			ip_match = re.search(r'(?<![\d.])(\d{1,3}(?:\.\d{1,3}){3})(?![\d.])', line)
+			mac_match = re.search(r'([0-9a-fA-F]{2}(?:[:-][0-9a-fA-F]{2}){5})', line)
+			if ip_match and mac_match:
+				try:
+					entries.append((ip_match.group(1), normalize_mac(mac_match.group(1))))
+				except ValueError:
+					pass
+
+	return list(dict.fromkeys(entries))
 
 ########################################
 def find_ip_by_mac_arptable(target_mac: str):
@@ -72,17 +136,10 @@ def find_ip_by_mac_arptable(target_mac: str):
 		target_mac = normalize_mac(target_mac)
 	except Exception:
 		return None
-	for ip, mac in parse_ip_neigh():
+
+	for ip, mac in parse_arp_table():
 		if mac == target_mac:
 			return ip
-	try:
-		out = subprocess.check_output(["arp", "-n"], text=True)
-	except Exception:
-		out = ""
-	for line in out.splitlines():
-		m = re.search(r'(\d+\.\d+\.\d+\.\d+)\s+([0-9a-f:]{17})', line.lower())
-		if m and normalize_mac(m.group(2)) == target_mac:
-			return m.group(1)
 	return None
 
 ########################################
@@ -97,6 +154,7 @@ class RsyncGUI(tk.Tk):
 		#self.bind("<Escape>", lambda event: self.attributes("-fullscreen", False))
 		self.devices = {}
 		self.selected_files = []
+		self.active_device = None
 		self._build_ui()
 		# preenche a senha padrão (se houver)
 		if DEFAULT_PASS:
@@ -217,20 +275,20 @@ class RsyncGUI(tk.Tk):
 	def _build_tab_files(self, parent):
 		top = ttk.Frame(parent)
 		top.pack(fill="x", padx=10, pady=8)
-		ttk.Label(top, text="Dispositivos detectados (cor quando encontrados):").pack(anchor="w")
-		self.devices_frame = ttk.Frame(top)
-		self.devices_frame.pack(fill="x", padx=4, pady=6)
+		ttk.Label(top, text="Veículo:").pack(anchor="w")
 
-		# Linhas de dispositivos (cor apenas quando IP é encontrado)
-		for i, (name, mac) in enumerate(MACS_CARS.items()):
-			var = tk.IntVar(value=0)
-			cb = ttk.Checkbutton(self.devices_frame, text=f"{CAR_ICON}{name.upper()} — {mac}",
-								 variable=var, style="Default.TCheckbutton")
-			cb.grid(row=i, column=0, sticky="w", padx=4, pady=2)
-			ip_label = tk.Label(self.devices_frame, text="... buscando ...", width=22,
-								fg="white", font=("Arial", 10, "bold"))
-			ip_label.grid(row=i, column=1, sticky="w", pady=2)
-			self.devices[name] = {"mac": mac, "ip_label": ip_label, "cb": cb, "var": var, "ip": None}
+		self.active_device_label = tk.Label(
+			top,
+			text="🔍 Procurando veículo...",
+			font=("Arial", 12, "bold"),
+			anchor="w"
+		)
+		self.active_device_label.pack(fill="x", padx=4, pady=6)
+
+		# Cadastro interno dos veículos. Os MACs são usados apenas para detecção
+		# e não são exibidos na interface.
+		for name, mac in MACS_CARS.items():
+			self.devices[name] = {"mac": mac, "ip": None}
 
 		# Botões de ação
 		btns = ttk.Frame(parent)
@@ -261,7 +319,7 @@ class RsyncGUI(tk.Tk):
 		self.dest_entry.insert(0, DEFAULT_DEST)
 		self.dest_entry.pack(side="left", fill="x", expand=True, padx=8)
 
-		# SSH e opções
+		# SSH / SFTP (Paramiko)
 		opt = ttk.Frame(parent)
 		opt.pack(fill="x", padx=10, pady=6)
 		ttk.Label(opt, text="Usuário:").pack(side="left")
@@ -271,16 +329,12 @@ class RsyncGUI(tk.Tk):
 		ttk.Label(opt, text="Senha:").pack(side="left", padx=(8, 0))
 		self.pass_entry = ttk.Entry(opt, width=14, show="*")
 		self.pass_entry.pack(side="left", padx=4)
-		ttk.Label(opt, text="Opções rsync:").pack(side="left", padx=(8, 0))
-		self.rsync_entry = ttk.Entry(opt, width=36)
-		self.rsync_entry.insert(0, RSYNC_OPTS)
-		self.rsync_entry.pack(side="left", padx=4)
+		ttk.Label(opt, text="Transferência: SFTP (multiplataforma)").pack(side="left", padx=(12, 0))
 
 		# Envio
 		send = ttk.Frame(parent)
 		send.pack(fill="x", padx=10, pady=6)
-		ttk.Button(send, text="Enviar para selecionados", command=self.send_to_selected).pack(side="left", padx=4)
-		ttk.Button(send, text="Enviar para todos (com IP)", command=self.send_to_all).pack(side="left", padx=4)
+		ttk.Button(send, text="Enviar arquivos", command=self.send_to_selected).pack(side="left", padx=4)
 
 		# Log
 		log_frame = ttk.Frame(parent)
@@ -298,7 +352,7 @@ class RsyncGUI(tk.Tk):
 
 	########################################
 	def _build_tab_cmds(self, parent):
-		ttk.Label(parent, text="Executar comandos remotos nas Raspberries selecionadas").pack(anchor="w", padx=10, pady=(10, 4))
+		ttk.Label(parent, text="Executar comandos remotos no veículo ativo").pack(anchor="w", padx=10, pady=(10, 4))
 
 		hint = ttk.Label(parent, text="Obs.: os comandos serão executados dentro de: (aba Enviar Arquivos) → campo 'Destino na Raspberry'",
 						 foreground="#888")
@@ -307,7 +361,16 @@ class RsyncGUI(tk.Tk):
 		cmds_frame = ttk.Frame(parent)
 		cmds_frame.pack(fill="x", padx=10, pady=4)
 		ttk.Label(cmds_frame, text="Comandos (1 por linha):").pack(anchor="w")
-		self.cmd_text = scrolledtext.ScrolledText(cmds_frame, height=6)
+		
+		self.cmd_text = scrolledtext.ScrolledText(
+			cmds_frame,
+			height=6,
+			bg="black",
+			fg="white",
+			insertbackground="white",
+			font=("Courier", 11)
+		)
+
 		self.cmd_text.insert(
 								"end",
 								'pkill -f "python3.*main.py"\n'
@@ -315,7 +378,7 @@ class RsyncGUI(tk.Tk):
 							)
 		self.cmd_text.pack(fill="x", pady=4)
 
-		ttk.Button(parent, text="Executar nos selecionados", command=self.run_cmds_on_selected).pack(pady=6)
+		ttk.Button(parent, text="Executar", command=self.run_cmds_on_selected).pack(pady=6)
 
 		# area inferior: grafico e terminal lado a lado
 		bottom = ttk.PanedWindow(parent, orient="horizontal")
@@ -388,12 +451,27 @@ class RsyncGUI(tk.Tk):
 		).pack(anchor="w")
 
 		self.cmd_log = scrolledtext.ScrolledText(
-			terminal_frame
+			terminal_frame,
+			bg="black",
+			fg="white",
+			insertbackground="white",
+			font=("Courier", 11)
 		)
 		self.cmd_log.pack(
 			fill="both",
 			expand=True
 		)
+		
+		# cores ANSI do terminal
+		self.cmd_log.tag_configure("ansi_black", foreground="#555555")
+		self.cmd_log.tag_configure("ansi_red", foreground="#ff5555")
+		self.cmd_log.tag_configure("ansi_green", foreground="#55ff55")
+		self.cmd_log.tag_configure("ansi_yellow", foreground="#ffff55")
+		self.cmd_log.tag_configure("ansi_blue", foreground="#5555ff")
+		self.cmd_log.tag_configure("ansi_magenta", foreground="#ff55ff")
+		self.cmd_log.tag_configure("ansi_cyan", foreground="#55ffff")
+		self.cmd_log.tag_configure("ansi_white", foreground="white")
+
 		self.cmd_log.configure(state="disabled")
 
 		# adiciona os dois lados
@@ -418,7 +496,7 @@ class RsyncGUI(tk.Tk):
 
 		ttk.Label(
 			devices_frame,
-			text="Os carrinhos selecionados na aba 'Enviar Arquivos' serão utilizados."
+			text="O primeiro veículo detectado será utilizado."
 		).pack(anchor="w")
 
 		# pasta local
@@ -451,7 +529,7 @@ class RsyncGUI(tk.Tk):
 		# botao de coleta
 		ttk.Button(
 			parent,
-			text="📥 Coletar dados dos selecionados",
+			text="📥 Coletar dados",
 			command=self.collect_data
 		).pack(
 			anchor="w",
@@ -493,7 +571,63 @@ class RsyncGUI(tk.Tk):
 	########################################
 	def cmdlog_write(self, text):
 		self.cmd_log.configure(state="normal")
-		self.cmd_log.insert("end", text + "\n")
+
+		ansi_colors = {
+			"30": "ansi_black",
+			"31": "ansi_red",
+			"32": "ansi_green",
+			"33": "ansi_yellow",
+			"34": "ansi_blue",
+			"35": "ansi_magenta",
+			"36": "ansi_cyan",
+			"37": "ansi_white",
+
+			# cores ANSI brilhantes
+			"90": "ansi_black",
+			"91": "ansi_red",
+			"92": "ansi_green",
+			"93": "ansi_yellow",
+			"94": "ansi_blue",
+			"95": "ansi_magenta",
+			"96": "ansi_cyan",
+			"97": "ansi_white",
+		}
+
+		current_tag = None
+		pos = 0
+
+		for match in ANSI_ESCAPE_RE.finditer(text):
+
+			# texto antes do código ANSI
+			part = text[pos:match.start()]
+
+			if part:
+				if current_tag:
+					self.cmd_log.insert("end", part, current_tag)
+				else:
+					self.cmd_log.insert("end", part)
+
+			# interpreta o código ANSI
+			codes = match.group()[2:-1].split(";")
+
+			for code in codes:
+				if code == "0":
+					current_tag = None
+				elif code in ansi_colors:
+					current_tag = ansi_colors[code]
+
+			pos = match.end()
+
+		# restante da linha
+		part = text[pos:]
+
+		if part:
+			if current_tag:
+				self.cmd_log.insert("end", part, current_tag)
+			else:
+				self.cmd_log.insert("end", part)
+
+		self.cmd_log.insert("end", "\n")
 		self.cmd_log.see("end")
 		self.cmd_log.configure(state="disabled")
 
@@ -550,92 +684,57 @@ class RsyncGUI(tk.Tk):
 
 	########################################
 	def refresh_ips(self):
-		"""
-		Atualiza IPs; antes de consultar a ARP, tenta gerar tráfego (ping) para
-		“acordar” as raspberries.
-		"""
-		self.ui(self.log_write, "🔍 Atualizando IPs ...")
+		"""Detecta os veículos cadastrados e usa somente o primeiro encontrado."""
+		self.ui(self.log_write, "🔍 Procurando veículo...")
+		self.ui(self.active_device_label.config, text="🔍 Procurando veículo...", fg="black")
 
-		# nomes que vamos tentar pingar (pode ajustar)
+		# Gera algum tráfego antes de consultar a tabela ARP.
 		possible_hosts = ["raspberrypi.local", "raspberrypi"]
+		for info in self.devices.values():
+			if info.get("ip"):
+				ping_host(info["ip"])
+		for host in possible_hosts:
+			ping_host(host)
+
+		arp_entries = parse_arp_table()
+		arp_by_mac = {mac: ip for ip, mac in arp_entries}
+
+		self.active_device = None
 
 		for name, info in self.devices.items():
-			# 1) tentar pingar algo antes de olhar a ARP
-			#    - se já tínhamos IP salvo, pinga esse IP
-			#    - senão pinga os hostnames padrão
-			warmed = False
-			if info.get("ip"):
-				try:
-					subprocess.run(
-						["ping", "-c", "1", "-W", "1", info["ip"]],
-						stdout=subprocess.DEVNULL,
-						stderr=subprocess.DEVNULL,
-						check=False,
-					)
-					warmed = True
-				except Exception:
-					pass
+			try:
+				mac = normalize_mac(info["mac"])
+			except ValueError:
+				mac = ""
 
-			if not warmed:
-				for host in possible_hosts:
-					try:
-						subprocess.run(
-							["ping", "-c", "1", "-W", "1", host],
-							stdout=subprocess.DEVNULL,
-							stderr=subprocess.DEVNULL,
-							check=False,
-						)
-					except Exception:
-						# se não conseguir pingar esse nome, tenta o próximo
-						continue
-
-			# 2) agora sim olha a ARP/`ip neigh`
-			ip = find_ip_by_mac_arptable(info["mac"])
+			ip = arp_by_mac.get(mac)
 			info["ip"] = ip
 
-			if ip:
-				self.ui(
-					info["ip_label"].config,
-					text=ip,
-					fg=COLORS.get(name, "#00ff00")
-				)
+			if ip and self.active_device is None:
+				self.active_device = (name, ip)
 
-				self.ui(
-					info["cb"].configure,
-					style=f"{name}.TCheckbutton"
-				)
-
-				self.ui(
-					info["var"].set,
-					1
-				)
-
-			else:
-				self.ui(
-					info["ip_label"].config,
-					text="não encontrado",
-					fg="white"
-				)
-
-				self.ui(
-					info["cb"].configure,
-					style="Default.TCheckbutton"
-				)
-
+		if self.active_device:
+			name, ip = self.active_device
 			self.ui(
-				self.log_write,
-				f"{name}: {ip if ip else 'não encontrado'}"
+				self.active_device_label.config,
+				text=f"{CAR_ICON}{name.upper()} — {ip}",
+				fg=COLORS.get(name, "#00aa00")
 			)
-
+			self.ui(self.log_write, f"🚗 Veículo detectado: {name.upper()} ({ip})")
+		else:
 			self.ui(
-				self.log_write,
-				"✅ Atualização concluída."
+				self.active_device_label.config,
+				text="⚠️ Nenhum veículo encontrado",
+				fg="#cc0000"
 			)
+			self.ui(self.log_write, "⚠️ Nenhum veículo encontrado.")
 
+		self.ui(self.log_write, "✅ Atualização concluída.")
 
 	########################################
 	def get_selected_devices(self):
-		return [(n, i["ip"]) for n, i in self.devices.items() if i["var"].get() and i["ip"]]
+		"""Retorna somente o primeiro veículo detectado (veículo ativo)."""
+		return [self.active_device] if self.active_device else []
 
 	########################################
 	# Envio de arquivos (aba 1)
@@ -643,61 +742,108 @@ class RsyncGUI(tk.Tk):
 	def send_to_selected(self):
 		targets = self.get_selected_devices()
 		if not targets:
-			messagebox.showinfo("Nenhum alvo", "Selecione pelo menos uma Raspberry com IP.")
+			messagebox.showinfo("Nenhum alvo", "Nenhum veículo foi detectado. Atualize os IPs e tente novamente.")
 			return
-		threading.Thread(target=self._run_rsync_for_targets, args=(targets,), daemon=True).start()
+		threading.Thread(target=self._run_sftp_for_targets, args=(targets,), daemon=True).start()
 
 	########################################
 	def send_to_all(self):
-		targets = [(n, i["ip"]) for n, i in self.devices.items() if i["ip"]]
-		threading.Thread(target=self._run_rsync_for_targets, args=(targets,), daemon=True).start()
+		# Mantido apenas por compatibilidade; usa somente o veículo ativo.
+		self.send_to_selected()
 
 	########################################
-	def _run_rsync_for_targets(self, targets):
-		dest = self.dest_entry.get().strip()
-		user = self.user_entry.get().strip() or SSH_USER
-		password = self.pass_entry.get().strip()
-		rsync_opts = self.rsync_entry.get().strip() or RSYNC_OPTS
+	def _connect_ssh(self, ip):
+		client = paramiko.SSHClient()
+		client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+		client.connect(
+			ip,
+			username=self.user_entry.get().strip() or SSH_USER,
+			password=self.pass_entry.get().strip() or None,
+			timeout=8,
+			auth_timeout=8,
+			banner_timeout=8,
+		)
+		return client
 
-		# Recursivo se houver diretório
-		if any(os.path.isdir(p) for p in self.selected_files):
-			if "-r" not in rsync_opts and "--recursive" not in rsync_opts:
-				rsync_opts += " -r"
+	########################################
+	def _sftp_mkdir_p(self, sftp, remote_dir):
+		remote_dir = posixpath.normpath(remote_dir)
+		parts = remote_dir.strip("/").split("/") if remote_dir != "/" else []
+		current = "/" if remote_dir.startswith("/") else ""
+		for part in parts:
+			current = posixpath.join(current, part)
+			try:
+				sftp.stat(current)
+			except IOError:
+				sftp.mkdir(current)
 
-		has_sshpass = shutil.which("sshpass") is not None
+	########################################
+	def _sftp_upload_file(self, sftp, local_path, remote_path):
+		self._sftp_mkdir_p(sftp, posixpath.dirname(remote_path))
+		sftp.put(local_path, remote_path)
 
-		# Verifica existência local
+	########################################
+	def _sftp_upload_directory_contents(self, sftp, local_dir, remote_dir):
+		self._sftp_mkdir_p(sftp, remote_dir)
+		for root, dirs, files in os.walk(local_dir):
+			rel = os.path.relpath(root, local_dir)
+			remote_root = remote_dir if rel == "." else posixpath.join(remote_dir, *rel.split(os.sep))
+			self._sftp_mkdir_p(sftp, remote_root)
+			for dirname in dirs:
+				self._sftp_mkdir_p(sftp, posixpath.join(remote_root, dirname))
+			for filename in files:
+				self._sftp_upload_file(
+					sftp,
+					os.path.join(root, filename),
+					posixpath.join(remote_root, filename),
+				)
+
+	########################################
+	def _run_sftp_for_targets(self, targets):
+		dest = (self.dest_entry.get().strip() or DEFAULT_DEST).rstrip("/")
+
+		if not self.selected_files:
+			self.ui(self.log_write, "⚠️ Nenhum arquivo ou pasta selecionado.")
+			return
+
 		missing = [p for p in self.selected_files if not os.path.exists(p)]
 		if missing:
-			self.log_write("❌ Itens inexistentes:")
-			for m in missing:
-				self.log_write("   - " + m)
+			self.ui(self.log_write, "❌ Itens inexistentes:")
+			for item in missing:
+				self.ui(self.log_write, "   - " + item)
 			return
 
 		for name, ip in targets:
-			self.log_write("=" * 60)
-			self.log_write(f"🚀 Enviando para {name.upper()} ({ip})")
-			base_cmd = ["rsync"] + rsync_opts.split()
-			if password and has_sshpass:
-				base_cmd = ["sshpass", "-p", password, "rsync"] + rsync_opts.split()
-			elif password and not has_sshpass:
-				self.log_write("⚠️ Senha informada mas 'sshpass' não está instalado. Prosseguindo sem sshpass (pode pedir senha).")
-
-			cmd = base_cmd + self.selected_files + [f"{user}@{ip}:{dest}"]
-			self.log_write("Comando: " + " ".join(cmd))
+			self.ui(self.log_write, "=" * 60)
+			self.ui(self.log_write, f"🚀 Enviando via SFTP para {name.upper()} ({ip})")
+			client = None
+			sftp = None
 			try:
-				proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False)
-				out = proc.stdout or ""
-				if out.strip():
-					self.log_write(out.strip())
-				if proc.returncode == 0:
-					self.log_write(f"✅ Sucesso: {name.upper()} ({ip})")
-				else:
-					self.log_write(f"⚠️ Erro (rc={proc.returncode}) em {name.upper()} ({ip})")
-			except Exception as e:
-				self.log_write(f"❌ Exceção: {e}")
+				client = self._connect_ssh(ip)
+				sftp = client.open_sftp()
+				self._sftp_mkdir_p(sftp, dest)
 
-		self.log_write("🏁 Todas as transferências finalizadas.")
+				for path in self.selected_files:
+					if os.path.isdir(path):
+						# Mesmo comportamento do antigo rsync com barra final:
+						# envia o CONTEÚDO da pasta para o destino.
+						self.ui(self.log_write, f"📁 {path} -> {dest}/")
+						self._sftp_upload_directory_contents(sftp, path, dest)
+					else:
+						remote_path = posixpath.join(dest, os.path.basename(path))
+						self.ui(self.log_write, f"📄 {path} -> {remote_path}")
+						self._sftp_upload_file(sftp, path, remote_path)
+
+				self.ui(self.log_write, f"✅ Sucesso: {name.upper()} ({ip})")
+			except Exception as e:
+				self.ui(self.log_write, f"❌ Erro em {name.upper()} ({ip}): {e}")
+			finally:
+				if sftp:
+					sftp.close()
+				if client:
+					client.close()
+
+		self.ui(self.log_write, "🏁 Todas as transferências finalizadas.")
 
 	########################################
 	# Execução remota (aba 2)
@@ -705,7 +851,7 @@ class RsyncGUI(tk.Tk):
 	def run_cmds_on_selected(self):
 		targets = self.get_selected_devices()
 		if not targets:
-			messagebox.showinfo("Nenhum alvo", "Selecione ao menos uma Raspberry com IP.")
+			messagebox.showinfo("Nenhum alvo", "Nenhum veículo foi detectado. Atualize os IPs e tente novamente.")
 			return
 		cmds = [c.strip() for c in self.cmd_text.get("1.0", "end").splitlines() if c.strip()]
 		if not cmds:
@@ -719,95 +865,51 @@ class RsyncGUI(tk.Tk):
 		
 	########################################
 	def _run_remote_cmds(self, targets, cmds):
-		user = self.user_entry.get().strip() or SSH_USER
-		password = self.pass_entry.get().strip()
-		has_sshpass = shutil.which("sshpass") is not None
 		remote_workdir = (self.dest_entry.get().strip() or DEFAULT_DEST).rstrip("/")
 
 		for name, ip in targets:
-			self.cmdlog_write("\n" + "=" * 60)
-			self.cmdlog_write(f"💻 Executando carro {name.upper()} ({ip}) - workdir: {remote_workdir}")
-			
-			for raw_cmd in cmds:
-				# executa o comando dentro do diretório de trabalho
-				wrapped = f'cd "{remote_workdir}" && {raw_cmd}'
+			self.ui(self.cmdlog_write, "\n" + "=" * 60)
+			self.ui(self.cmdlog_write, f"💻 Executando carro {name.upper()} ({ip}) - workdir: {remote_workdir}")
+			client = None
+			try:
+				client = self._connect_ssh(ip)
+				for raw_cmd in cmds:
+					wrapped = f'cd "{remote_workdir}" && {raw_cmd}'
+					self.ui(self.cmdlog_write, f"$ {wrapped}")
 
-				# monta comando ssh (evita usar bash -lc; envia uma linha única)
-				if password and has_sshpass:
-					full_cmd = ["sshpass", "-p", password, "ssh", "-o", "StrictHostKeyChecking=no", f"{user}@{ip}", wrapped]
-				else:
-					full_cmd = ["ssh", "-o", "StrictHostKeyChecking=no", f"{user}@{ip}", wrapped]
-
-				self.cmdlog_write(f"$ {wrapped}")
-				try:
-					'''proc = subprocess.run(full_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-					out = (proc.stdout or "").strip()
-					if out:
-						self.cmdlog_write(out)'''
-						
-					proc = subprocess.Popen(
-						full_cmd,
-						stdout=subprocess.PIPE,
-						stderr=subprocess.STDOUT,
-						text=True,
-						bufsize=1
-					)
-
-					'''for line in proc.stdout:
-						line = line.rstrip()
-
-						if line:
-							self.cmdlog_write(f"[{name.upper()}] {line}")'''
-					for line in proc.stdout:
-						line = line.rstrip()
-
+					stdin, stdout, stderr = client.exec_command(wrapped, get_pty=True)
+					for line in iter(stdout.readline, ""):
+						line = line.rstrip("\r\n")
 						if not line:
 							continue
 
-						if line.startswith("DATA,"):
+						if ANSI_ESCAPE_RE.sub("", line).lstrip().startswith("DATA,"):
 							try:
-								_, t, x, y, v, vref, a, u, w, th = line.split(",")
-
+								sample = parse_telemetry_line(line)
 								if name not in self.telemetry:
 									self.telemetry[name] = {
-										"t": [],
-										"x": [],
-										"y": [],
-										"v": [],
-										"vref": [],
-										"a": [],
-										"u": [],
-										"w": [],
-										"th": []
+										"t": [], "x": [], "y": [], "v": [], "vref": [],
+										"a": [], "u": [], "w": [], "th": []
 									}
-
-								self.telemetry[name]["t"].append(float(t))
-								self.telemetry[name]["x"].append(float(x))
-								self.telemetry[name]["y"].append(float(y))
-								self.telemetry[name]["v"].append(float(v))
-								self.telemetry[name]["vref"].append(float(vref))
-								self.telemetry[name]["a"].append(float(a))
-								self.telemetry[name]["u"].append(float(u))
-								self.telemetry[name]["w"].append(float(w))
-								self.telemetry[name]["th"].append(float(th))
-
+								data = self.telemetry[name]
+								for key, value in sample.items():
+									data[key].append(value)
 								self.after(0, self.update_plot)
-
-							except ValueError:
-								self.cmdlog_write(
-									f"[{name.upper()}] Telemetria invalida: {line}"
-								)
-
+							except ValueError as e:
+								self.ui(self.cmdlog_write, f"[{name.upper()}] Telemetria inválida: {e} | {line!r}")
 						else:
-							self.cmdlog_write(f"[{name.upper()}] {line}")
+							self.ui(self.cmdlog_write, f"[{name.upper()}] {line}")
 
-					proc.wait()
-					
-					if proc.returncode != 0:
-						self.cmdlog_write(f"⚠️ Retorno {proc.returncode} para comando: {raw_cmd}")
-				except Exception as e:
-					self.cmdlog_write(f"❌ Erro: {e}")
-			self.cmdlog_write(f"✅ Carro {name.upper()} finalizado")
+					rc = stdout.channel.recv_exit_status()
+					if rc != 0:
+						self.ui(self.cmdlog_write, f"⚠️ Retorno {rc} para comando: {raw_cmd}")
+
+				self.ui(self.cmdlog_write, f"✅ Carro {name.upper()} finalizado")
+			except Exception as e:
+				self.ui(self.cmdlog_write, f"❌ Erro em {name.upper()} ({ip}): {e}")
+			finally:
+				if client:
+					client.close()
 
 	########################################
 	# Execução remota (aba 3)
@@ -829,7 +931,7 @@ class RsyncGUI(tk.Tk):
 		if not targets:
 			messagebox.showinfo(
 				"Nenhum alvo",
-				"Selecione pelo menos uma Raspberry com IP."
+				"Nenhum veículo foi detectado. Atualize os IPs e tente novamente."
 			)
 			return
 
@@ -851,75 +953,45 @@ class RsyncGUI(tk.Tk):
 		).start()
 	
 	########################################
+	def _sftp_download_directory_contents(self, sftp, remote_dir, local_dir):
+		os.makedirs(local_dir, exist_ok=True)
+		for entry in sftp.listdir_attr(remote_dir):
+			remote_path = posixpath.join(remote_dir, entry.filename)
+			local_path = os.path.join(local_dir, entry.filename)
+			if stat.S_ISDIR(entry.st_mode):
+				self._sftp_download_directory_contents(sftp, remote_path, local_path)
+			else:
+				sftp.get(remote_path, local_path)
+
+	########################################
 	def _collect_data(self, targets, local_base):
-
-		user = self.user_entry.get().strip() or SSH_USER
-		password = self.pass_entry.get().strip()
-		has_sshpass = shutil.which("sshpass") is not None
-
-		remote_workdir = (
-			self.dest_entry.get().strip() or DEFAULT_DEST
-		).rstrip("/")
-
-		remote_logs = remote_workdir + "/logs/"
+		remote_workdir = (self.dest_entry.get().strip() or DEFAULT_DEST).rstrip("/")
+		remote_logs = posixpath.join(remote_workdir, "logs")
 
 		for name, ip in targets:
-
-			# pasta separada para cada carrinho
 			local_dest = os.path.join(local_base, name)
 			os.makedirs(local_dest, exist_ok=True)
+			self.ui(self.datalog_write, f"📥 Coletando dados de {name.upper()} ({ip})...")
 
-			self.datalog_write(
-				f"📥 Coletando dados de {name.upper()} ({ip})..."
-			)
-
-			if password and has_sshpass:
-				cmd = [
-					"sshpass", "-p", password,
-					"rsync",
-					"-avz",
-					f"{user}@{ip}:{remote_logs}",
-					local_dest + "/"
-				]
-			else:
-				cmd = [
-					"rsync",
-					"-avz",
-					f"{user}@{ip}:{remote_logs}",
-					local_dest + "/"
-				]
-
+			client = None
+			sftp = None
 			try:
-				proc = subprocess.run(
-					cmd,
-					stdout=subprocess.PIPE,
-					stderr=subprocess.STDOUT,
-					text=True,
-					check=False
-				)
-
-				out = proc.stdout or ""
-
-				if out.strip():
-					self.datalog_write(out.strip())
-
-				if proc.returncode == 0:
-					self.datalog_write(
-						f"✅ Dados de {name.upper()} coletados."
-					)
-				else:
-					self.datalog_write(
-						f"❌ Erro ao coletar dados de {name.upper()} "
-						f"(rc={proc.returncode})."
-					)
-
+				client = self._connect_ssh(ip)
+				sftp = client.open_sftp()
+				self._sftp_download_directory_contents(sftp, remote_logs, local_dest)
+				self.ui(self.datalog_write, f"✅ Dados de {name.upper()} coletados.")
+			except FileNotFoundError:
+				self.ui(self.datalog_write, f"❌ Pasta remota não encontrada: {remote_logs}")
 			except Exception as e:
-				self.datalog_write(
-					f"❌ Erro em {name.upper()}: {e}"
-				)
+				self.ui(self.datalog_write, f"❌ Erro em {name.upper()} ({ip}): {e}")
+			finally:
+				if sftp:
+					sftp.close()
+				if client:
+					client.close()
 
-		self.datalog_write("🏁 Coleta finalizada.")
-		
+		self.ui(self.datalog_write, "🏁 Coleta finalizada.")
+	
 	########################################
 	def datalog_write(self, text):
 		self.data_log.configure(state="normal")
@@ -1023,9 +1095,5 @@ class RsyncGUI(tk.Tk):
 # Execução
 ########################################
 if __name__ == "__main__":
-	if shutil.which("rsync") is None:
-		print("Aviso: instale rsync (sudo apt install rsync)")
-	if shutil.which("ssh") is None:
-		print("Aviso: instale openssh-client (sudo apt install openssh-client)")
 	app = RsyncGUI()
 	app.mainloop()

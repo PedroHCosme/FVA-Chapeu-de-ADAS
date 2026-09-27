@@ -101,15 +101,14 @@ def vision_func(car, vision_data, stop_event):
 ########################################
 if __name__ == "__main__":
 
-	parameters = {
-		'ts'                   : 20.0,
-		'save'                 : True,
-		'logfile'              : 'logs/',
-		'camera'               : False,
-		'ultrasonic_steering'  : False,
-		'us_buzzer'            : False,
-		'initial_position'     : [0, 0, np.deg2rad(0)]
-	}
+	parameters = {	
+				'ts'					: 20.0, 	# tempo da execucao
+				'save'					: True,		# salva dados da trajetoria
+				'logfile'				: 'logs/',	# log file
+				'camera'				: False,	# habilitar camera e thread de visao
+				'us_buzzer'				: True,		# aviso sonoro para objetos proximos
+				'initial_position'		: [0, 0, np.deg2rad(0)]	# (x, y, theta) configuracao inicial
+			}
 
 	car = Car(parameters)
 	
@@ -158,15 +157,15 @@ if __name__ == "__main__":
 			# telemetria para plots remotos
 			print(
 				f"DATA,"
-				f"{car.t:.3f},"
-				f"{car.p[0]:.3f},"
-				f"{car.p[1]:.3f},"
-				f"{car.v:.3f},"
-				f"{car.vref:.3f},"
-				f"{car.a:.3f},"
-				f"{car.u:.3f},"
-				f"{car.w:.3f},"
-				f"{car.th:.3f}",
+				f"{car.t:.2f},"
+				f"{car.p[0]:.2f},"
+				f"{car.p[1]:.2f},"
+				f"{car.v:.2f},"
+				f"{car.vref:.2f},"
+				f"{car.a:.2f},"
+				f"{car.u:.2f},"
+				f"{car.w:.2f},"
+				f"{car.th:.2f}",
 				flush=True
 			)
 
