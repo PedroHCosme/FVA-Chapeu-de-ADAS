@@ -78,12 +78,20 @@ class Car:
 		self.vref = 0.0
 		
 		# variaveis calculadas
-		self.p = np.zeros(2)
-		self.p_gps = None
-		self.th = 0.0
+		self.p_offset = np.array(parameters['initial_position'][:2], dtype=float)
+		self.p = self.p_offset.copy()
+		self.th = parameters['initial_position'][2]
 		self.w = 0.0
 		self.v = 0.0
 		self.a = 0.0
+		self.p_gps = None
+		
+		# monitorar calibracao
+		self.a_model = 0.0
+		self.a_x = 0.0
+		self.w_model = 0.0
+		self.w_imu = 0.0
+		self.yaw_mag = 0.0
 		
 		# comando de aceleracao
 		self.u = 0.0
@@ -247,47 +255,33 @@ class Car:
 	########################################
 	# passo para atualizar sensores
 	def step(self):
-		# tempo anterior
-		t0 = self.t
 		
-		# espera o periodo de delta t
-		elapsed_time = self.get_time() - self.tinit - t0
-		time.sleep(np.max([0.0, self.sample_rate - elapsed_time]))
-		
-		# condicoes iniciais
-		self.get_states()
-		
-		# atualiza amostragem
-		self.dt = self.t - t0
-		
-		# se esta dando re, avise
-		if self.gear == servos.Gear.REVERSE:
-			self.bz.beep(0.3, silence=0.5)
-		
-		# salva trajetoria
-		self.save_traj()
-		
-	########################################
-	# salva a trajetoria
-	def save_traj(self):
-		
-		# dados
-		data = {	't'     : self.t, 
-					'p'     : self.p, 
-					'v'     : self.v,
-					'a'		: self.a,
-					'vref'  : self.vref,
-					'th'    : self.th,
-					'w'     : self.w,
-					'u'     : self.u,
-				}
-				
-		# se ja iniciou as trajetorias
 		try:
-			self.traj.append(data)
-		# se for a primeira vez
-		except:
-			self.traj = [data]
+			# tempo anterior
+			t0 = self.t
+			
+			# espera o periodo de delta t
+			elapsed_time = self.get_time() - self.tinit - t0
+			time.sleep(np.max([0.0, self.sample_rate - elapsed_time]))
+			
+			# condicoes iniciais
+			self.get_states()
+			
+			# atualiza amostragem
+			self.dt = self.t - t0
+			
+			# se esta dando re, avise
+			if self.gear == servos.Gear.REVERSE:
+				self.bz.beep(0.3, silence=0.5)
+			
+			# salva trajetoria
+			self.save_traj()
+			
+			return True
+
+		except KeyboardInterrupt:
+			print("\nInterrupcao solicitada pelo usuario.")
+			return False
 			
 	########################################
 	# retorna tempo do sistema
@@ -313,7 +307,8 @@ class Car:
 				p_gps = self.gps.get_xy(position)
 
 				if p_gps is not None:
-					self.p_gps = np.array(p_gps)
+					# soma offset de posicao relativa
+					self.p_gps = self.p_offset + np.array(p_gps)
 
 					# fusao sensorial simples
 					K = 0.1
@@ -331,12 +326,12 @@ class Car:
 
 		# corrige com bussola somente se houver GPS
 		if self.gps is not None:
-			_, _, yaw_mag = self.imu.get_euler(degrees=False)
+			_, _, self.yaw_mag = self.imu.get_euler(degrees=False)
 
-			if yaw_mag is not None:
+			if self.yaw_mag is not None:
 				K = 0.05
 				# erro angular corretamente embrulhado
-				error = np.arctan2(np.sin(yaw_mag - yaw), np.cos(yaw_mag - yaw))
+				error = np.arctan2(np.sin(self.yaw_mag - yaw), np.cos(self.yaw_mag - yaw))
 				yaw += K*error
 
 		# mantem entre 0 e 2*pi
@@ -358,15 +353,15 @@ class Car:
 			vf = self.v
 
 		# velocidade angular pelo modelo cinematico
-		w_model = (vf / CAR['L']) * np.tan(self.st)
+		self.w_model = (vf / CAR['L']) * np.tan(self.st)
 
 		# velocidade angular medida pela IMU
-		_, _, gz = self.imu.get_gyro()
-		w_imu = np.deg2rad(gz)
+		_, _, g_z = self.imu.get_gyro()
+		self.w_imu = np.deg2rad(g_z)
 
 		# fusao modelo + IMU
 		K = 0.8
-		w = (1.0 - K)*w_model + K*w_imu
+		w = (1.0 - K)*self.w_model + K*self.w_imu
 
 		# filtra velocidade angular
 		wf = self.w_filt.filter(w)
@@ -377,18 +372,18 @@ class Car:
 	# retorna aceleracao
 	def get_accel(self):
 
-		if self.dt == 0.0:
-			return 0.0
-
-		# aceleracao pelo encoder
-		a_model = (self.v - self.v_ant)/self.dt
+		if self.dt > 0.0:
+			# aceleracao pelo encoder
+			self.a_model = (self.v - self.v_ant)/self.dt
+		else:
+			self.a_model = 0.0
 
 		# aceleracao medida pela IMU
-		a_x, _, _ = self.imu.get_accel()
+		self.a_x, _, _ = self.imu.get_accel()
 
 		# fusao sensorial
 		K = 0.2
-		a = (1.0 - K)*a_model + K*a_x
+		a = (1.0 - K)*self.a_model + K*self.a_x
 
 		# filtra
 		af = self.a_filt.filter(a)
@@ -397,7 +392,7 @@ class Car:
 	
 	########################################
 	# seta referencia de controle
-	def set_ref(self, vref):
+	def _set_ref(self, vref):
 		# em caso de emergencia, pare
 		if self.emergencia:
 			self.vref = 0.0
@@ -426,7 +421,7 @@ class Car:
 		Kd = 0.2
 
 		# define referencia e marcha
-		self.set_ref(vref)
+		self._set_ref(vref)
 
 		# controla magnitude da velocidade
 		vref_abs = abs(self.vref)
@@ -512,28 +507,45 @@ class Car:
 		return d , valid
 	
 	########################################
-	# save traj em csv		
+	# salva a trajetoria
+	def save_traj(self):
+		
+		# dados (COLOCAR APENAS ESCALARES)
+		data = {	
+					't'     : self.t, 
+					'x'     : self.p[0], 
+					'y'     : self.p[1],
+					'v'     : self.v,
+					'a'		: self.a,
+					'vref'  : self.vref,
+					'th'    : self.th,
+					'w'     : self.w,
+					'u'     : self.u,
+					'a_model'	: self.a_model,
+					'a_x'		: self.a_x,
+					'w_model'	: self.w_model,
+					'w_imu'   	: self.w_imu,
+					'yaw_mag'	: self.yaw_mag,
+				}
+				
+		# se ja iniciou as trajetorias
+		try:
+			self.traj.append(data)
+		# se for a primeira vez
+		except:
+			self.traj = [data]
+		
+	########################################
+	# salva trajetoria em csv
 	def save(self):
+
 		filename = os.path.join(self.logfile, 'car.csv')
 
-		data = np.array([
-			[
-				traj['t'],
-				traj['p'][0],
-				traj['p'][1],
-				traj['v'],
-				traj['a'],
-				traj['vref'],
-				traj['th'],
-				traj['w'],
-				traj['u']
-			]
-			for traj in self.traj
-		])
+		header = ','.join(self.traj[0].keys())
 
-		header = 't,x,y,v,a,vref,th,w,u'
+		data = np.array([list(traj.values()) for traj in self.traj])
 
-		np.savetxt(filename, data, delimiter=',', header=header,  comments='')
+		np.savetxt(filename, data, delimiter=',', header=header, comments='')
 	
 	########################################
 	# termina a missao
@@ -546,10 +558,14 @@ class Car:
 		self.set_u(-CAR['ACCELMAX'])
 		self.set_steer(0.0)
 		
-		# espera ate parar
+		# tenta parar por no maximo alguns segundos
+		t0 = self.get_time()
 		while abs(self.v) > 0.1:
 			self.step()
 			time.sleep(0.1)
+			# nao espera para sempre
+			if self.get_time() - t0 > 3.0:
+				break
 		
 		# sinaliza fim
 		time.sleep(1.0)
@@ -608,13 +624,14 @@ if __name__ == "__main__":
 	
 	# Globais
 	parameters = {	
-				'ts'					: 30.0,		# tempo da execucao
-				'save'					: False,	# salvar trajetoria
+				'ts'					: 30.0, 	# tempo da execucao
+				'save'					: True,		# salva dados da trajetoria
 				'logfile'				: 'logs/',	# log file
-				'camera'				: False,	# usar camera
-				'ultrasonic_steering' 	: True,		# mover ultrasom com estercamento
+				'camera'				: False,	# habilitar camera e thread de visao
+				'ultrasonic_steering' 	: False,	# mover ultrasom com estercamento
 				'us_buzzer'				: True,	# aviso sonoro para objetos proximos
-				}
+				'initial_position'		: [0, 0, np.deg2rad(0)]	# (x, y, theta) configuracao inicial
+			}
 	
 	# cria comunicacao com o carrinho
 	car = Car(parameters)

@@ -156,15 +156,12 @@ if __name__ == "__main__":
 	########################################
 	# parametros
 	########################################
-	parameters = {	
-				'ts'					: 300.0, 	# tempo da execucao
-				'save'					: True,		# salva dados da trajetoria
-				'logfile'				: 'logs/',	# log file
-				'camera'				: False,	# habilitar camera e thread de visao
-				'ultrasonic_steering' 	: False,	# mover ultrasom com estercamento
-				'us_buzzer'				: False,	# aviso sonoro para objetos proximos
-				'initial_position'		: [0, 0, np.deg2rad(0)]	# (x, y, theta) configuracao inicial
-			}
+	parameters = {
+		'ts'      : 300.0,
+		'save'    : True,
+		'logfile' : 'logs/',
+		'beep'    : True,
+	}
 
 	########################################
 	# carrega waypoints
@@ -180,18 +177,13 @@ if __name__ == "__main__":
 	waypoints = np.column_stack(
 		(data['x'], data['y'])
 	)
+
 	# ignora o primeiro ponto START
 	waypoints = waypoints[1:]
 
 	########################################
 	# cria carro e navegacao
 	########################################
-	parameters['initial_position'] = [
-										data['x'][0],
-										data['y'][0],
-										data['theta'][0]
-									]
-									
 	car = Car(parameters)
 	nav = Navigation(car)
 
