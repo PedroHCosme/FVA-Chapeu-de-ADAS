@@ -7,3 +7,9 @@ veiculo_real/capitulo/*.pdf
 *.md
 # exceção: o README vem do repositório do professor
 !/README.md
+
+# Analise dos ensaios do carro real: saidas geradas, logs de treino e cache
+__pycache__/
+veiculo_real/**/analise.png
+veiculo_real/**/analise.txt
+veiculo_real/tools/aula_simulada/
