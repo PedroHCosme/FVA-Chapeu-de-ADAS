@@ -26,7 +26,23 @@ import time
 # (0.9 seen with a half-empty one) -- the loop just gets slower.
 ########################################
 K_NOM        = 1.6     # m/s^2 per unit u -- charged battery (fitted on runs 002634..003330)
-V_REF        = 1       # m/s -- cruise speed target
+# K_NOM is the plant gain the controller ASSUMES (v_dot = K * u); the real K is what
+# analise/analisa.py prints as "K medido". What sets the loop speed is KP_eff = KP * K / K_NOM.
+# Runs of 2026-09-25: real K ~ 0.95-1.09 and plant lag tau ~ 0.7 s (not K 1.6 / tau 0.25), and the
+# 'avanco' preset (KP 0.8) worked well with K_NOM = 1.6: KP_eff = 0.55. K_NOM ABOVE the real K is
+# the safe side (slower loop, no overshoot). Simulated on the fitted plant (tau 0.715, DB 3.95),
+# overshoot of the 'avanco' law:
+#     K real   K_NOM 1.6 (KP_eff)    K_NOM = K real    K_NOM ~1.4 x K real
+#     0.9-1.09   0-1.2%  (0.55)        13-16%            (not needed)
+#     1.4        8.5%    (0.70)        15%               K_NOM 2.0 -> 0.8%
+#     1.6        13.8%   (0.80)        13.8%             K_NOM 2.3 -> 0.3%
+#     2.0        24.7%   (1.00)        11%               K_NOM 2.6 -> 1.1%
+# So: keep 1.6 while the measured K stays <= ~1.2. If it comes back HIGHER (fresh battery, K >=
+# ~1.4 as on 2026-09-24), raise K_NOM to ~1.4 x K (aim at KP_eff ~ 0.55), NOT to K itself: with
+# the slow plant K_NOM = K leaves KP_eff = 0.8, too fast (13-16% overshoot). analisa.py simulates
+# the candidates and prints the choice. A higher K_NOM also weakens the feedforward (u_ff = rate / K_NOM).
+# The simulation under-predicts the real 'avanco' overshoot by ~3 points (sim 1.2%, car 4-6%).
+V_REF        = 1.3      # m/s -- cruise speed target
 TAXA_RAMPA_V = 0.9     # m/s^2 -- ramp-up rate for vdes
 
 ########################################
@@ -40,25 +56,42 @@ TAXA_RAMPA_V = 0.9     # m/s^2 -- ramp-up rate for vdes
 #   'avanco'    same as 'base' plus the derivative term (see _PROJETOS).
 #   'v_alta'    'base' cruising at 1.3 m/s.
 #   'auto'      the preset that analisa.py printed (paste it into _PROJETOS['auto']).
+#   'frenagem'  'avanco' following a DECREASING reference: holds 1.0 m/s long enough for the slow
+#               car to get there and settle, then steps down 1.0 > 0.6 > (up) 1.0 > 0.6 slowly
+#               > 0.2 > 0 with different slew rates. Tests what the professor calls braking.
+#   'freio_esc' EXPLORATORY, hardware risk: does the ESC brake actively when the throttle goes
+#               BELOW neutral in forward gear? See _freio_esc. Not run on the car yet.
 # Then: python analise/analisa.py   (on the PC, after copying the new log folder).
-ENSAIO = 'base'
+ENSAIO = 'avanco'   # 'base', 'patamares', 'u_degrau', 'avanco', 'v_alta', 'auto', 'frenagem', 'freio_esc'
 
-PISTA_M        = 12.0   # m of straight track available
+PISTA_M        = 100000000   # m of straight track available
 ATRASO_PARTIDA = 1.0    # s -- the car needs about this long to start moving (deadband)
 V_CORTE        = 0.7    # m/s -- 'u_degrau' stops accelerating here (measured; MA30 lags ~0.4 s and the
                         #        throttle keeps rising meanwhile, so the real peak is ~1.1 m/s)
 PWM_CORTE      = 8.0    # deg -- ... or when the estimated throttle gets here (v_ss ~ 1 m/s), whichever first
 
-# vref profile = list of (t [s], target [m/s]); vdes slews toward the target at
-# TAXA_RAMPA_V. None = ramp to V_REF and hold (the validated 'base' reference).
+V_FREIO        = 0.8    # m/s -- speed the 'freio_esc' test brakes from
+T_SOBE         = 10.0   # s -- 'freio_esc': time allowed to reach V_FREIO from rest (the car is slow: ~1.5 s
+                        #      of deadband + ~4 s to rise, see the straight-line runs of 2026-09-25)
+T_PULSO        = 0.8    # s -- 'freio_esc': longest time the throttle stays below neutral (released earlier at v < 0.15)
+
+# vref profile = list of (t [s], target [m/s]) or (t, target, slew rate [m/s^2]); vdes slews toward the
+# target at TAXA_RAMPA_V unless the step gives its own rate. None = ramp to V_REF and hold (the validated
+# 'base' reference). Steps are spaced >= 6-7 s: the car needs ~4 s to settle after a step (tau ~0.7 s + MA30).
 ROTEIRO = {
-	'base'     : dict(projeto='base',   perfil=None, ts=12.0),
-	'avanco'   : dict(projeto='avanco', perfil=None, ts=12.0),
-	'auto'     : dict(projeto='auto',   perfil=None, ts=12.0),
-	'v_alta'   : dict(projeto='base',   perfil=None, ts=10.0, vref=1.3),
-	'patamares': dict(projeto='base',   ts=14.5,
+	'base'     : dict(projeto='base',   perfil=None, ts=30000.0),
+	'avanco'   : dict(projeto='avanco', perfil=None, ts=40.0),
+	'auto'     : dict(projeto='auto',   perfil=None, ts=3000000.0),
+	'v_alta'   : dict(projeto='base',   perfil=None, ts=30.0, vref=2.0),
+	'patamares': dict(projeto='base',   ts=90.5,
 	                  perfil=[(0, 0.6), (3.5, 0.9), (6.5, 1.1), (9.5, 0.8), (12, 0.5), (13.5, 0.0)]),
-	'u_degrau' : dict(aberto=[0.3, 0.5, 0.8], ts=16.0),
+	'u_degrau' : dict(aberto=[0.5, 0.8, 1.3, 1.8], ts=30.0),
+	# reach 1.0 (t = 0-13: ~5 s to get there + settling), step down -0.4 fast, back up, step down -0.4 at only
+	# 0.25 m/s^2, -0.4 fast to 0.2, stop. ~32 m.
+	'frenagem' : dict(projeto='avanco', ts=50.0,
+	                  perfil=[(0, 1.0), (13, 0.6), (20, 1.0), (27, 0.6, 0.25), (34, 0.2), (41, 0.0)]),
+	# throttle pulse below neutral (deg) applied after the throttle is drained; 0 = plain coasting control
+	'freio_esc': dict(projeto='avanco', freio=[0, 6, 12, 18], ts=80.0),
 }
 _E = ROTEIRO[ENSAIO]
 V_REF = _E.get('vref', V_REF)
@@ -68,13 +101,14 @@ V_REF = _E.get('vref', V_REF)
 #            67 deg nominal, 56 deg at K=2.0 tau=0.4.
 #   'avanco' the same law plus a derivative (lead) term on the error. Found in
 #            simulation only (matlab-control/): phase margin 68 deg at K=2.0
-#            tau=0.4, faster settling. NOT tested on the car yet.
+#            tau=0.4, faster settling. Tested on the car 2026-09-25 (straight line
+#            and ramps): overshoot 4-6%, RMS error 0.02 m/s. This is the chosen one.
 #   'auto'   starts equal to 'base'; analisa.py prints the line to paste here.
 # TD_DERIV = 0 makes the law identical to 'base' for any KP_MOD / TAU_VDES.
 _PROJETOS = {
 	'base'  : dict(KP=0.6, TD=0.0, TAU_VDES=0.3),
 	'avanco': dict(KP=0.8, TD=0.6, TAU_VDES=0.5),
-	'auto'  : dict(KP=0.6, TD=0.0, TAU_VDES=0.3),
+	'auto'  : dict(KP=0.5, TD=0.8, TAU_VDES=0.3, K_NOM=1.09),
 }
 PROJETO      = _E.get('projeto', 'base')
 K_NOM        = _PROJETOS[PROJETO].get('K_NOM', K_NOM)  # m/s^2 per unit u
@@ -86,9 +120,9 @@ def _pontos(perfil, taxa):
 	# breakpoints (t, v) of the reference: it slews to each target at `taxa` and is
 	# cut when the next step starts
 	pts = [(0.0, 0.0)]
-	for t_i, alvo in perfil:
+	for t_i, alvo, *r in perfil:   # optional 3rd item: slew rate of this step
 		v_i = float(np.interp(t_i, *zip(*pts)))
-		pts = [p for p in pts if p[0] < t_i] + [(t_i, v_i), (t_i + abs(alvo - v_i) / taxa, alvo)]
+		pts = [p for p in pts if p[0] < t_i] + [(t_i, v_i), (t_i + abs(alvo - v_i) / (r[0] if r else taxa), alvo)]
 	return pts
 
 _PONTOS = _pontos(_E['perfil'], TAXA_RAMPA_V) if _E.get('perfil') else None
@@ -102,6 +136,8 @@ def _vdes(tau):
 def _confere_pista():
 	# rough distance travelled = integral of the reference delayed by the startup;
 	# refuse to run a profile that does not fit the track
+	if 'freio' in _E:   # per level: climb to V_FREIO, coast while the throttle drains, stop
+		return len(_E['freio']) * (V_FREIO * (T_SOBE - 2.0) + 3.0)
 	t = np.arange(0.0, _E['ts'], 0.01)
 	v = np.array([_vdes(x - ATRASO_PARTIDA) if x > ATRASO_PARTIDA else 0.0 for x in t])
 	dist = float(v.sum() * 0.01)
@@ -129,7 +165,7 @@ def _u_aberto(car, s):
 				vai('fim')
 		return 0.0
 	if s['fase'] == 'sobe':
-		u = niveis[s['i']]
+		u = min(niveis[s['i']], 1.0)   # set_u clips at +-1: the pwm estimate below must see the same u
 		s['pwm'] = min(s['pwm'] + k_pwm * u * dt, 25.0)
 		if car.v >= V_CORTE or s['pwm'] >= PWM_CORTE or s['tf'] > 6.0:
 			vai('desce')
@@ -200,12 +236,73 @@ def controlador_longitudinal(car, vdes_bruto):
 	return float(np.clip(u, -1.0, 1.0))
 
 ########################################
+# EXPLORATORY 'freio_esc' -- NOT run on the car yet; hardware risk, run it with someone holding the car.
+# Question: servos.py never commands the throttle below neutral in forward gear (th_pwm >= 0), so the
+# car only COASTS. _backward() taps the ESC below neutral four times, the usual brake/reverse
+# sequence of hobby ESCs, so a pulse below neutral may brake. servos._set_pwm adds trim_throttle
+# (rad) to the command and its forward clip allows 18 deg below neutral, so the test shifts the trim
+# for a short pulse while the throttle is at 0. Per level in _E['freio'] (deg below neutral):
+#   sobe   avanco controller to V_FREIO from rest (T_SOBE s)
+#   drena  u = -1 until the estimated throttle is 0 (the car coasts)
+#   pulso  trim = -level for at most T_PULSO s, released early at v < 0.15 (an ESC can go into
+#          REVERSE if the pulse outlasts the stop; v is signed, v < 0 would show it)
+#   espera trim = 0, wait until the car is stopped
+# The log has no trim column, so vref carries the marker: -0.01 while draining, -max(level/10, 0.02)
+# during the pulse (level 0 = plain coasting control), 0 while waiting. analisa.py reads it.
+def _aplica_trim(car, graus):
+	a = getattr(car, 'atuador', None)
+	if a is not None:
+		a.trim_throttle = -np.deg2rad(graus)
+
+def _freio_esc(car, s):
+	k_pwm = np.rad2deg(0.4 * 0.08 * 5.16)   # deg/s of throttle per unit u (servos.py, car.py)
+	dt = car.dt if 0.0 < car.dt < 0.5 else 0.0
+	s.setdefault('fase', 'sobe'); s.setdefault('i', 0); s.setdefault('pwm', 0.0)
+	s['tf'] = s.get('tf', 0.0) + dt
+	s['pwm'] = min(max(s['pwm'] + k_pwm * car.u * dt, 0.0), 18.08)   # car.u = what was applied last cycle
+	niveis = _E['freio']
+	nivel = niveis[min(s['i'], len(niveis) - 1)]
+	def vai(f):
+		s['fase'], s['tf'] = f, 0.0
+		if f == 'sobe':   # the controller starts from rest again
+			for k in ('vdes_ma', 'derro', 'erro_ant'):
+				s.pop(k, None)
+			_vdes_filt.reset(0.0)
+	trim, u = 0.0, 0.0
+	car.vref = 0.0
+	if s['fase'] == 'sobe':
+		car.vref = min(V_FREIO, TAXA_RAMPA_V * s['tf'])
+		u = controlador_longitudinal(car, car.vref)
+		if s['tf'] > T_SOBE:
+			vai('drena')
+	elif s['fase'] == 'drena':
+		u, car.vref = -1.0, -0.01
+		if (s['pwm'] <= 0.0 and s['tf'] > 0.3) or s['tf'] > 4.0:
+			vai('pulso')
+	elif s['fase'] == 'pulso':
+		trim, car.vref = nivel, -max(nivel / 10.0, 0.02)
+		if s['tf'] > T_PULSO or (s['tf'] > 0.1 and car.v < 0.15):
+			vai('espera')
+			trim, car.vref = 0.0, 0.0
+	elif s['fase'] == 'espera':
+		s['parado'] = s.get('parado', 0.0) + dt if abs(car.v) < 0.05 else 0.0
+		if s['parado'] >= 1.0 or s['tf'] > 8.0:
+			s['i'] += 1
+			s['parado'] = 0.0
+			vai('sobe' if s['i'] < len(niveis) else 'fim')
+	_aplica_trim(car, trim)
+	car.set_u(float(np.clip(u, -1.0, 1.0)))
+
+########################################
 # controle de velocidade
 def control_func(car):
 	# open-loop test: vref is logged as 0, u is the test signal
 	if 'aberto' in _E:
 		car.vref = 0.0
 		car.set_u(_u_aberto(car, _estado))
+		return
+	if 'freio' in _E:
+		_freio_esc(car, _estado)
 		return
 	# the reference starts at the first control call: here car.t already counts
 	# start_mission()'s 1 s sleep (in the sim, t starts at ~0 in the loop)
@@ -258,6 +355,8 @@ if __name__ == "__main__":
 
 	if 'aberto' in _E:
 		print(f"ENSAIO '{ENSAIO}' (malha aberta, u = {_E['aberto']}), ts = {_E['ts']} s", flush=True)
+	elif 'freio' in _E:
+		print(f"ENSAIO '{ENSAIO}' (EXPLORATORIO: pulsos abaixo do neutro {_E['freio']} graus, ~{_confere_pista():.0f} m), ts = {_E['ts']} s", flush=True)
 	else:
 		print(f"ENSAIO '{ENSAIO}': projeto '{PROJETO}', ~{_confere_pista():.1f} m de {PISTA_M} m, ts = {_E['ts']} s", flush=True)
 
@@ -299,10 +398,10 @@ if __name__ == "__main__":
 			# ultrassom
 			dist, valid = car.get_distance()
 
-			if (not valid) or (dist < 0.20):
-				print(f"Colisao: distance {dist:.2f} [m]")
-				car.set_vel(0.0)
-			else:
+			#if (not valid) or (dist < 0.20):
+				#print(f"Colisao: distance {dist:.2f} [m]")
+				#car.set_vel(0.0)
+			if True:
 				control_func(car)
 
 			# telemetria para plots remotos
@@ -344,6 +443,7 @@ if __name__ == "__main__":
 		if thread_vision is not None:
 			thread_vision.join(timeout=1.0)
 
+		_aplica_trim(car, 0.0)   # never leave the 'freio_esc' pulse applied
 		car.close()
 
 	print('Terminou...')

@@ -37,7 +37,7 @@ REAL = Path(__file__).resolve().parents[1]
 
 # ---- o que o codigo do carro diz (servos.py, car.py) -----------------------------------
 K_PWM = np.rad2deg(0.4 * 0.08 * 5.16)             # graus/s de acelerador por unidade de u
-TH_MAX = (1.5 + 8.9370) / 0.092294 - 95.0         # limite do acelerador [graus] (nunca atingido)
+TH_MAX = (1.5 + 8.9370) / 0.092294 - 95.0         # limite do acelerador [graus] (atingido em subida)
 N_MA = 30                                         # car.py: v_filt = MovingAverage(n=30)
 G_DE = lambda K: K / K_PWM                        # K [m/s^2 por u] -> G [m/s por grau]
 K_DE = lambda G: G * K_PWM
@@ -74,6 +74,7 @@ def carrega_main(ensaio='base'):
 
 class CarroFalso:
     v_filt = type('F', (), {'n': N_MA})()
+    atuador = type('A', (), {'trim_throttle': 0.0})()   # o 'freio_esc' escreve o trim aqui
     t = dt = v = vref = u = 0.0
 
     def set_u(self, u):                       # car.py set_u: +-1 e protecao |v| > VELMAX
@@ -101,17 +102,25 @@ _MODS = {}   # um main.py carregado por ensaio
 
 def reconhece(x):
     """(nome do ensaio, modulo) cujo controlador reproduz o u logado; ('desconhecido', None) se nenhum."""
-    melhor = ('desconhecido', None, 0.0)
+    melhor = ('desconhecido', None, 0.0, None)
     if not _MODS:
         _MODS.update({n: carrega_main(n) for n in carrega_main('base').ROTEIRO})
     for nome, mod in _MODS.items():
-        u, _ = repassa(mod, x['t'], x['v'])
-        ok = (x['t'] <= mod._E['ts'] + 0.05) & ~np.isnan(u)
-        ok[:3] = False
-        acerto = float(np.mean(np.abs(u[ok] - x['u'][ok]) < 2e-3)) if ok.any() else 0.0
-        if acerto > melhor[2]:
-            melhor = (nome, mod, acerto)
-    return (melhor[0], melhor[1]) if melhor[2] > 0.97 else ('desconhecido', None)
+        v_ref0 = mod.V_REF
+        # V_REF e uma constante que voce edita no main.py entre corridas: tenta tambem o alvo que o log mostra
+        for v_ref in ({v_ref0, round(float(x['vref'].max()), 2)} if 'aberto' not in mod._E else {v_ref0}):
+            mod.V_REF = v_ref
+            u, _ = repassa(mod, x['t'], x['v'])
+            ok = (x['t'] <= mod._E['ts'] + 0.05) & ~np.isnan(u)
+            ok[:3] = False
+            acerto = float(np.mean(np.abs(u[ok] - x['u'][ok]) < 2e-3)) if ok.any() else 0.0
+            if acerto > melhor[2]:
+                melhor = (nome, mod, acerto, v_ref)
+        mod.V_REF = v_ref0
+    if melhor[2] > 0.97:
+        x['V_REF'] = melhor[3]      # quem usar o modulo (malha) tem que por mod.V_REF = x['V_REF']
+        return melhor[0], melhor[1]
+    return 'desconhecido', None
 
 
 # ---- dados e planta --------------------------------------------------------------------
@@ -221,8 +230,9 @@ def bloco_rampa(x, E, mod, ajx):
             sug.append(f"K medido ({K:.2f}) e {100 * (K / mod.K_NOM - 1):.0f}% maior que K_NOM ({mod.K_NOM}): a malha fica mais agressiva que a projetada. "
                        f"Suba K_NOM para ~{K:.2f} (FF fica exato e KP/K_NOM cai na mesma proporcao).")
         if mod and K < 0.85 * mod.K_NOM:
-            sug.append(f"K medido ({K:.2f}) e {100 * (1 - K / mod.K_NOM):.0f}% menor que K_NOM ({mod.K_NOM}): resposta mais lenta que a projetada (bateria fraca?). "
-                       "Confira a bateria antes de mexer no ganho; com K_NOM menor o FF fica correto.")
+            sug.append(f"K medido ({K:.2f}) e {100 * (1 - K / mod.K_NOM):.0f}% menor que K_NOM ({mod.K_NOM}): resposta mais lenta que a projetada. "
+                       f"Se a bateria esta fraca, troque/recarregue; se {K:.2f} e o K normal do carro, o valor seria K_NOM = {K:.2f}, "
+                       "mas compare antes as duas opcoes simuladas no bloco da planta ajustada (K menor que K_NOM e o lado seguro).")
     if m['ultra'] > 5:
         sug.append("sobressinal alto: reduza KP (menos ganho de malha) ou ative o derivativo (ENSAIO 'avanco': TD da margem de fase); TAU_VDES maior suaviza a referencia.")
     if m['ultra'] < 0.5 and (np.isnan(m['a5']) or m['a5'] > 4.0):
@@ -247,10 +257,11 @@ def bloco_degraus(x, E, mod, ajx):
     """Patamares: por degrau, e a curva estatica v x pwm lida direto do fim de cada degrau."""
     t, v, th, u, perfil = x['t'], x['v'], x['th'], x['u'], E['perfil']
     t0 = float(t[np.argmax(x['vref'] > 0)])
+    dv = np.gradient(np.convolve(v, np.ones(15) / 15, 'same'), t)   # dv/dt com ~0,4 s de suavizacao
     L = [f"  {x['nome']}  {x['ensaio']}   (KP {mod.KP_MOD}, TD {mod.TD_DERIV}, TAU_VDES {mod.TAU_VDES}, K_NOM {mod.K_NOM})",
-         "    degrau        v final   erro    ultrapassa  entra em +-0,05  pwm no fim (0,7 s)  u sat."]
+         "    degrau        v final   erro    ultrapassa  entra em +-0,05  pwm no fim (0,7 s)  u sat.  |dv/dt| max"]
     fins, ant, pts = [p[0] for p in perfil[1:]] + [E['ts']], 0.0, []
-    for (ti, alvo), tf in zip(perfil, fins):
+    for (ti, alvo, *_), tf in zip(perfil, fins):   # 3o item opcional do perfil = taxa da referencia
         j = (t >= t0 + ti) & (t < t0 + tf)
         if j.sum() > 5:
             tj, vj = t[j] - t[j][0], v[j]
@@ -260,7 +271,8 @@ def bloco_degraus(x, E, mod, ajx):
             tacom = float(tj[fora[-1]]) if len(fora) else 0.0
             vf, pf = float(np.mean(vj[tj > tj[-1] - 0.7])), float(np.mean(th[j][tj > tj[-1] - 0.7]))
             sat = 100 * float(np.mean(np.abs(u[j]) >= 0.99))
-            L.append(f"    {'sobe ' if sobe else 'desce'} -> {alvo:.1f}   {vf:6.2f}  {vf - alvo:+.2f}   {max(0.0, ultra):6.2f}      {tacom:5.1f} s        {pf:6.2f}      {sat:4.1f}%")
+            taxa = float(dv[j].max() if sobe else -dv[j].min())
+            L.append(f"    {'sobe ' if sobe else 'desce'} -> {alvo:.1f}   {vf:6.2f}  {vf - alvo:+.2f}   {max(0.0, ultra):6.2f}      {tacom:5.1f} s        {pf:6.2f}      {sat:4.1f}%   {taxa:5.2f} m/s2")
             if tacom < (tj[-1] - 0.7) and alvo > 0.05:
                 pts.append((pf, vf))          # degrau acomodado: ponto da curva estatica
         ant = alvo
@@ -300,6 +312,41 @@ def bloco_aberto(x, E):
         a, b = np.polyfit([p[0] for p in pts], [p[1] for p in pts], 1)
         L.append(f"    atraso = a/u + b:  a = {a:.2f} s, b = {b:.2f} s  ->  DB ~ a x {K_PWM:.2f} = {a * K_PWM:.2f} graus")
         L.append("    (aproximado: o limiar v>0,05 e a MA30 somam ~0,3 s em b e um pouco em a; compare com a DB do ajuste dinamico)")
+    return L
+
+
+def bloco_freio(x, E):
+    """freio_esc: um pulso abaixo do neutro por nivel. O log nao tem o trim; o vref leva a marca
+    (-0,01 drenando; -max(nivel/10, 0,02) no pulso). Numeros para comparar cada nivel com o 0 (so atrito)."""
+    t, v, vr = x['t'], x['v'], x['vref']
+    L = [f"  {x['nome']}  {x['ensaio']}  (EXPLORATORIO; o pulso e lido da marca no vref)",
+         "    nivel   inicio    dur    v no inicio   v 0,45 s apos o fim   queda media   v minimo   parou em   distancia ate parar"]
+    marca = vr < -0.015
+    k, base = 1, None
+    while k < len(t):
+        if marca[k] and not marca[k - 1]:
+            j = k
+            while j < len(t) and marca[j]:
+                j += 1
+            nivel = 0.0 if vr[k] > -0.03 else round(-10 * float(np.median(vr[k:j])), 1)
+            ta, tb = float(t[k]), float(t[j - 1])
+            v0 = float(np.interp(ta, t, v))
+            v1 = float(np.interp(tb + 0.45, t, v))     # a MA30 atrasa ~0,43 s: o efeito do pulso aparece depois
+            queda = (v0 - v1) / (tb + 0.45 - ta)
+            resto = slice(k, len(t))
+            pos = np.nonzero(v[resto] < 0.05)[0]
+            kp = k + int(pos[0]) if len(pos) else None
+            parou = f"{t[kp] - ta:5.1f} s" if kp is not None else "    -  "
+            dist = f"{float(np.trapezoid(v[k:kp], t[k:kp])):5.2f} m" if kp is not None else "    -  "
+            vmin = float(v[k:min(len(t), j + 100)].min())
+            L.append(f"    {nivel:4.0f}   {ta:6.1f} s  {tb - ta:4.2f} s   {v0:6.2f} m/s      {v1:6.2f} m/s        {queda:5.2f} m/s2   {vmin:+6.2f}   {parou}   {dist}")
+            if nivel == 0.0:
+                base = queda
+            elif base:
+                L[-1] += f"   ({queda / base:.1f}x o atrito)"
+            k = j
+        k += 1
+    L.append("    v minimo < 0 = o carro deu re (o pulso passou da parada). queda media >> a do nivel 0 = o ESC freia; igual = so atrito.")
     return L
 
 
@@ -448,25 +495,35 @@ def main():
         print(f"{x['nome']}: {nome}{aviso}")
 
     # so entram no ajuste corridas que MEXEM o carro; K por corrida denuncia a bateria
-    uteis = [x for x in xs if x['v'].max() > 0.3]
+    # Malha aberta (u_degrau, ou log com vref = 0 e u > 0) entra mesmo devagar: o que importa e quando o carro
+    # comeca a andar, nao a velocidade que atinge (com bateria fraca ela fica ~0,2 m/s).
+    for x in xs:
+        x['aberto'] = (x['mod'] is not None and 'aberto' in x['mod']._E) or (x['mod'] is None and not (x['vref'] > 0).any() and x['u'].max() > 0.01)
+    # 'freio_esc' tem pulso de freio que o modelo da planta nao tem: fica fora do ajuste
+    for x in xs:
+        x['freio'] = x['mod'] is not None and 'freio' in x['mod']._E
+    uteis = [x for x in xs if x['v'].max() > (0.05 if x['aberto'] else 0.3)]
     for x in uteis:
         g, tau = ajusta_um(x)
         x['K_corrida'], x['tau_corrida'] = K_DE(g), tau
-    if uteis and not args.todos:
-        Kmed = float(np.median([x['K_corrida'] for x in uteis]))
+    # so as corridas de malha fechada denunciam a bateria pelo K (a aberta lenta tem K mal determinado)
+    fechadas = [x for x in uteis if not x['aberto'] and not x['freio']]
+    if fechadas and not args.todos:
+        Kmed = float(np.median([x['K_corrida'] for x in fechadas]))
         for x in uteis:
-            x['bateria_ok'] = 0.8 * Kmed <= x['K_corrida'] <= 1.25 * Kmed
+            x['bateria_ok'] = x['aberto'] or (0.8 * Kmed <= x['K_corrida'] <= 1.25 * Kmed)
     else:
         for x in uteis:
             x['bateria_ok'] = True
-    grupo = [x for x in uteis if x['bateria_ok']]
+    grupo = [x for x in uteis if x['bateria_ok'] and not x['freio']]
 
     linhas = []
     P = linhas.append
     P(f"=== {len(xs)} log(s), {len(uteis)} com movimento, {len(grupo)} no ajuste ===")
     for x in uteis:
         P(f"  {x['nome']}  {x['ensaio']:10s}  K(DB={DB_REF},d={D_REF}) = {x['K_corrida']:.2f}  tau = {x['tau_corrida']:.2f}"
-          + ('' if x['bateria_ok'] else '   <-- FORA do grupo (bateria/ganho diferente): nao entra no ajuste'))
+          + ('   (pulso de freio: fora do ajuste da planta)' if x['freio'] else
+             '' if x['bateria_ok'] else '   <-- FORA do grupo (bateria/ganho diferente): nao entra no ajuste'))
 
     aj = None
     if grupo:
@@ -488,6 +545,41 @@ def main():
             P(f"  ATENCAO: o carro ficou >= 1 s em patamares que cobrem so {amplitude:.1f} m/s. Nesta faixa so a COMBINACAO G x (pwm - DB) e conhecida:"
               " varias duplas (G, DB) explicam igualmente os dados, entao DB e G isolados nao sao confiaveis (o K, sim, perto dessa velocidade)."
               " Rode 'patamares' e 'u_degrau' e passe esses logs junto.")
+        # o K medido bate com o K_NOM do main.py? (K_NOM e o unico numero de planta que o controlador usa)
+        K_atual, Ks = _MODS['base'].K_NOM, [K_DE(g) for g in aj['G']]
+        dif = 100 * (aj['K'] / K_atual - 1)
+        P(f"\n  K_NOM no main.py = {K_atual}   K medido (mediana das corridas) = {aj['K']:.2f}   "
+          f"(por corrida: {min(Ks):.2f} a {max(Ks):.2f})   diferenca {dif:+.0f}%")
+        if abs(dif) <= 15:
+            P("  -> dentro de +-15%: pode manter o K_NOM (o projeto cobre K de 1,3 a 2,0).")
+        else:
+            P(f"  -> FORA de +-15% (hoje 'K_NOM = {K_atual}', linha perto do topo do main.py)"
+              + ("   (K ainda incerto: falta patamares/u_degrau)" if amplitude < 0.4 else ""))
+            # controlador final = preset 'avanco'. K_NOM = K medido NAO e o melhor: com a planta lenta (tau ~0,7 s) o
+            # cruzamento KP*K/K_NOM = KP fica alto demais; o bom e KP*K/K_NOM ~ 0,55, isto e K_NOM ~ 1,4 x K
+            mk = carrega_main('avanco')
+            P(f"     Simulado na planta ajustada (preset 'avanco', KP {mk.KP_MOD}, TD {mk.TD_DERIV}): sobressinal / acomodacao +-5%")
+            cands = sorted({K_atual, *(round(f * aj['K'], 2) for f in (1.0, 1.25, 1.5, 1.75, 2.0))})
+            res = {}
+            for kn in cands:
+                mk.K_NOM = kn
+                res[kn] = {n: malha(mk, aj['K'] * f_k, aj['DB'], aj['tau'] * f_t, aj['d']) for n, (f_k, f_t) in
+                           {'K medido': (1, 1), 'K x1,25 e tau x1,5': (1.25, 1.5)}.items()}
+                P(f"       K_NOM = {kn:<5} (KP*K/K_NOM = {mk.KP_MOD * aj['K'] / kn:.2f}): "
+                  + '   '.join(f"{n}: {o:4.1f}% / {s:3.1f} s" for n, (o, s) in res[kn].items()))
+            alto = 'K x1,25 e tau x1,5'
+            if res[K_atual]['K medido'][0] <= 3.0:
+                o, s = res[K_atual]['K medido']
+                P(f"     Sugestao: MANTER 'K_NOM = {K_atual}' (no K medido: {o:.1f}% / {s:.1f} s; K_NOM acima do K real e o lado seguro). "
+                  f"No caso alto da {res[K_atual][alto][0]:.0f}%: se quiser mais folga, suba K_NOM (malha mais lenta), veja as linhas acima.")
+            else:
+                bons = [kn for kn in cands if res[kn]['K medido'][0] <= 2.0]
+                if bons:
+                    melhor_kn = min(bons, key=lambda kn: (res[kn][alto][0] > 8.0, res[kn]['K medido'][1]))
+                    P(f"     Sugestao: 'K_NOM = {melhor_kn}' (<= 2% de sobressinal no K medido, o mais rapido; prefere <= 8% no caso alto).")
+                else:
+                    P("     Nenhuma opcao testada fica <= 2% no K medido: a planta mudou muito; reveja KP/TD com o 'auto'.")
+            P("     K_NOM acima do K real e o lado SEGURO (malha mais lenta, sem sobressinal). Se o K varia muito entre corridas, e a bateria: troque/recarregue.")
         # previsao cega dos modelos antigos + ajustado, por corrida
         P("\n=== previsao por corrida: rmse [m/s] (fit %) ===")
         P("  Os dois modelos antigos preveem SEM ver esta corrida. 'ajustado agora' JA VIU todas (nota otimista, so mede o ajuste).")
@@ -504,11 +596,15 @@ def main():
     P("\n=== metricas por ensaio ===")
     for x in uteis:
         mod = x['mod']
+        if mod:
+            mod.V_REF = x['V_REF']
         E = mod._E if mod else dict(ts=float(x['t'][-1]), perfil=None)
         i = next((k for k, g in enumerate(grupo) if g is x), None)
         ajx = dict(aj, G=aj['G'][i]) if (aj is not None and i is not None) else None
-        if mod is not None and 'aberto' in E:
+        if x['aberto']:
             linhas_x = bloco_aberto(x, E)
+        elif x['freio']:
+            linhas_x = bloco_freio(x, E)
         elif not (x['vref'] > 0).any():
             continue
         elif E['perfil'] is not None:
@@ -541,14 +637,20 @@ def main():
 
     texto = '\n'.join(linhas)
     print('\n' + texto)
+    falhas = []
     for x, pasta in zip(xs, pastas):
         i = next((k for k, g in enumerate(grupo) if g is x), None)
         ajx = dict(aj, G=aj['G'][i]) if (aj is not None and i is not None) else None
         fig = figura(x, x['ensaio'], MODELOS, ajx, texto)
-        fig.savefig(pasta / 'analise.png', dpi=110)
+        try:   # arquivo aberto em outro programa (visualizador de imagem) nao pode derrubar o relatorio
+            fig.savefig(pasta / 'analise.png', dpi=110)
+            (pasta / 'analise.txt').write_text(texto, encoding='utf-8')
+        except OSError as e:
+            falhas.append(f"{pasta / 'analise.png'} ({e.strerror or e})")
         plt.close(fig)
-        (pasta / 'analise.txt').write_text(texto, encoding='utf-8')
-    print(f"\nfiguras: <pasta do log>/analise.png ({len(xs)})")
+    print(f"\nfiguras: <pasta do log>/analise.png ({len(xs) - len(falhas)} de {len(xs)})")
+    for f in falhas:
+        print(f"  NAO consegui gravar {f}: feche o arquivo se estiver aberto e rode de novo")
 
 
 if __name__ == '__main__':

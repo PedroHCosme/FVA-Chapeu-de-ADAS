@@ -12,4 +12,5 @@ veiculo_real/capitulo/*.pdf
 __pycache__/
 veiculo_real/**/analise.png
 veiculo_real/**/analise.txt
-veiculo_real/tools/aula_simulada/
+veiculo_real/analise/*.png
+veiculo_real/tools/aula_simulada*/
