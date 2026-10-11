@@ -2,7 +2,7 @@
 """Gera TODAS as figuras e tabelas do relatorio (Parte 1, ADAS longitudinal) a partir dos logs em logs/.
 
 Uso (nesta pasta):   python figuras_relatorio.py
-Saida: imgs/*.pdf, tab_aeb.tex, tab_sonar.tex, numeros.tex (macros \\num... usadas no texto) e numeros.txt.
+Saida: imgs/*.pdf, tab_aeb.tex, numeros.tex (macros \\num... usadas no texto) e numeros.txt.
 Os logs sao copias de simulador/logs/<id>/car.csv (CoppeliaSim) e veiculo_real/adas/roxo/<id>/{car,sonar}.csv (carro real).
 """
 import os
@@ -119,7 +119,7 @@ def fig_ident():
 # ================================================================ 3) controle PI+FF no simulador (plano + rampa)
 def fig_sim_controle():
     d = simcar('20260923_173603')
-    t, v, u, x = d['t'], d['v'], d['u'], d['x']
+    t, v, u = d['t'], d['v'], d['u']
     vdes = np.minimum(1.0, 0.9 * t)
     pre = (t > 1) & (t < 6)
     sobre = 100 * (v[pre].max() - 1.0)
@@ -129,7 +129,6 @@ def fig_sim_controle():
     k98 = kmin + np.argmax(v[kmin:] >= 0.98)
     macro('SimOvershoot', vir(max(sobre, 0.0), 2)); macro('SimDipVmin', vir(v[kmin], 2))
     macro('SimTRec', vir(t[k98] - t[k0], 2)); macro('SimTdip', vir(t[k0], 1))
-    macro('SimXdip', vir(x[k0], 1))
     # chacoalho de u antes/depois do filtro TAU_U (mesma metrica da documentacao: std(diff(u)), t >= 8 s)
     ant, dep = simcar('20260922_234940'), simcar('20260923_090619')
     ch = lambda dd: np.std(np.diff(dd['u'][dd['t'] >= 8.0]))
@@ -192,13 +191,11 @@ def fig_real_parada():
     k = '20260930_224401'
     d = realcar(k)
     t, v, u, x, vr = d['t'], d['v'], d['u'], d['x'], d['vref']
-    kc = np.argmax(vr < 0.01) if (vr < 0.01).any() and t[np.argmax(vr < 0.01)] > 2 else None
     kc = np.where((vr[1:] < 0.01) & (vr[:-1] >= 0.01))[0][0] + 1
     tc = t[kc]
     kp = kc + np.argmax(v[kc:] < 0.05)
     macro('ParV', vir(np.interp(tc, t, v), 2)); macro('ParDist', vir(x[kp] - x[kc], 2))
     macro('ParTempo', vir(t[kp] - tc, 1))
-    macro('RealVcruz', vir(np.median(v[(t > 4.5) & (t < tc)]), 2))
     fig, ax = plt.subplots(2, 1, figsize=(3.3, 2.6), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
     ax[0].plot(t, vr, color=CINZA, ls='--', label='$v_{ref}$'); ax[0].plot(t, v, color=AZUL, label='$v$')
     ax[0].axvline(tc, color=VERM, lw=0.8); ax[0].set_ylabel('$v$ [m/s]'); ax[0].legend(loc='upper right')
@@ -228,17 +225,10 @@ def eventos(k):
         v0 = float(np.interp(t0, c['t'], c['v']))
         m = (c['t'] > t0) & (c['v'] < 0.05)
         tp = float(c['t'][m][0]) if m.any() else np.nan
-        dp = np.nan
-        if np.isfinite(tp):
-            w = val & (np.abs(ts - tp) < 0.3)
-            if w.any():
-                dp = float(np.median(s['d'][w]))
         fim = tp if np.isfinite(tp) else min(t1, t0 + 4.0)
         w2 = val & (ts >= t0) & (ts <= fim)
         dmin = float(s['d'][w2].min()) if w2.any() else np.nan
-        vmin = float(c['v'][(c['t'] >= t0) & (c['t'] <= fim)].min())
-        out.append(dict(run=k, t0=t0, v0=v0, d0=float(s['d'][i]), dg=d_gat(v0), dt=tp - t0, dp=dp, dmin=dmin, vmin=vmin,
-                        liberou=(j < len(ad))))
+        out.append(dict(run=k, v0=v0, d0=float(s['d'][i]), dg=d_gat(v0), dt=tp - t0, dmin=dmin))
     return out
 
 
@@ -260,29 +250,16 @@ def tab_aeb():
     macro('AebDtMin', vir(dt[ok].min(), 1)); macro('AebDtMax', vir(dt[ok].max(), 1)); macro('AebDtMed', vir(np.median(dt[ok]), 1))
     macro('AebDmMin', vir(dm[ok].min(), 2)); macro('AebDmMax', vir(dm[ok].max(), 2)); macro('AebDmMed', vir(np.median(dm[ok]), 2))
     macro('AebVmin', vir(v0.min(), 2)); macro('AebVmax', vir(v0.max(), 2))
-    macro('AebReverso', str(int(sum(1 for e in ev if e['vmin'] < -0.05))))
-    macro('AebVminGlob', vir(min(realcar(r)['v'].min() for r in runs), 2))
-    macro('AebAtras', str(int(sum(1 for e in ev if e['d0'] > e['dg'] + 0.05))))
-    macro('AebMovel', ', '.join(e['run'][9:] for e in ev if not np.isfinite(e['dt'])))
-    return ev
 
 
-def fig_aeb(ev):
+def fig_aeb():
     runs = ['20260930_230029', '20260930_231242']
     fig, ax = plt.subplots(2, 2, figsize=(6.7, 3.3), sharex='col')
     for col, k in enumerate(runs):
         c, s = realcar(k), realsonar(k)
         val = s['valid'] > 0
-        ad = s['adas']
         for a in ax[:, col]:
-            for cod, cor in ((1, '#ffe08a'), (2, '#f5a3a3')):
-                m = ad == cod
-                if m.any():
-                    ts = s['t']
-                    ini = np.where(np.diff(np.r_[0, m.astype(int), 0]) == 1)[0]
-                    fim = np.where(np.diff(np.r_[0, m.astype(int), 0]) == -1)[0]
-                    for i0, i1 in zip(ini, fim):
-                        a.axvspan(ts[i0], ts[min(i1, len(ts) - 1)], color=cor, alpha=0.6, lw=0)
+            sombreia(a, k)
         ax[0, col].plot(c['t'], c['vref'], color=CINZA, ls='--', label='$v_{ref}$')
         ax[0, col].plot(c['t'], c['v'], color=AZUL, label='$v$')
         ax[0, col].set_title(f'{ENS[k]} (log {k[9:]})')
@@ -303,12 +280,7 @@ def fig_aeb_demo():
     ad = s['adas']
     fig, ax = plt.subplots(2, 1, figsize=(6.7, 2.7), sharex=True)
     for a in ax:
-        for cod, cor in ((1, '#ffe08a'), (2, '#f5a3a3')):
-            m = ad == cod
-            ini = np.where(np.diff(np.r_[0, m.astype(int), 0]) == 1)[0]
-            fim = np.where(np.diff(np.r_[0, m.astype(int), 0]) == -1)[0]
-            for i0, i1 in zip(ini, fim):
-                a.axvspan(s['t'][i0], s['t'][min(i1, len(s['t']) - 1)], color=cor, alpha=0.6, lw=0)
+        sombreia(a, k)
     ax[0].plot(c['t'], c['vref'], color=CINZA, ls='--', label='$v_{ref}$'); ax[0].plot(c['t'], c['v'], color=AZUL, label='$v$')
     ax[0].set_ylabel('$v$ [m/s]'); ax[0].legend(loc='upper right', ncol=2)
     ax[1].plot(s['t'][val], s['d'][val], '.', ms=2, color=VERDE)
@@ -316,14 +288,14 @@ def fig_aeb_demo():
     ax[1].set_ylim(0, 4.2); ax[1].set_ylabel('$d$ [m]'); ax[1].set_xlabel('$t$ [s]')
     fig.tight_layout()
     fig.savefig(os.path.join(IMG, 'aeb_demo.pdf')); plt.close(fig)
-    macro('DemoVmax', vir(c['v'].max(), 2)); macro('DemoDmin', vir(s['d'][val].min(), 2))
+    macro('DemoDmin', vir(s['d'][val].min(), 2))
     macro('DemoEv', str(int(np.sum((ad[1:] == 2) & (ad[:-1] != 2)))))
 
 
 if __name__ == '__main__':
     os.makedirs(IMG, exist_ok=True)
     fig_onoff(); fig_ident(); fig_sim_controle(); fig_real_cruzeiro(); fig_real_parada()
-    ev = tab_aeb(); fig_aeb(ev); fig_aeb_demo()
+    tab_aeb(); fig_aeb(); fig_aeb_demo()
     with open(os.path.join(AQUI, 'numeros.tex'), 'w', encoding='utf-8') as f:
         for k, v in num.items():
             f.write(f'\\newcommand{{\\num{k}}}{{{v}}}\n')

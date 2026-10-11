@@ -7,7 +7,6 @@
 # DELT - Escola de Engenharia
 # Universidade Federal de Minas Gerais
 ########################################
-# -*- coding: utf-8 -*-
 from fva_car import Car
 from fva_car.filter import AlphaFilter, MovingAverage
 import numpy as np
@@ -17,20 +16,7 @@ import time
 import os
 
 ########################################
-# ENSAIO: troque SO esta linha entre as corridas (este e o unico arquivo copiado para o carro).
-#   'avanco'      lei escolhida (P + D + feedforward), rampa ate V_REF, ~15 m
-#   'avanco_ff'   a mesma malha com o feedforward completo (K_FF, TAU_FF): o A/B contra o 'avanco'
-#   'frenagem'    'avanco' seguindo referencia DECRESCENTE, ~11 m: 1,0 -> 0,5 rapido -> 0 devagar
-#   'frenagem_ff' o mesmo com a lei 'avanco_ff'
-#   'avanco_rt'   a mesma rampa com a lei re-sintonizada (analise/sintonia.py): 3o candidato do A/B
-#   'frenagem_rt' a 'frenagem' com a lei 'avanco_rt'
-#   'subida_ff'   SUBIDA: parte ~5 m antes da rampa, V_REF que voce editar (1,0 ou 1,3); lei 'avanco_ff'
-#   'subida_rt'   o mesmo com a lei 'avanco_rt'
-#   'parada'      rampa ate V_REF, cruzeiro e, em T_PARADA s, CORTA (u = -1, vref 0): mede a distancia e o tempo de
-#                 parada a partir da velocidade de cruzeiro (a mesma acao da emergencia do ADAS). Segurem o carro
-#   'sonar'       carro PARADO, alguem segura uma caixa na frente do ultrassom (instrucoes no terminal)
-#   'u_degrau'    malha ABERTA: u constante a partir do repouso (zona morta e atraso)
-#   'patamares'   degraus de referencia 0,6 > 0,9 > 1,1 > 0,8 > 0,5 m/s (separa ganho G de zona morta)
+# ENSAIO: troque SO esta linha entre as corridas (este e o unico arquivo copiado para o carro); chaves em ROTEIRO.
 # Toda corrida grava car.csv e sonar.csv (leitura do ultrassom). Analise: analise/ROTEIRO.md.
 ENSAIO = 'avanco_rt'
 
@@ -45,41 +31,32 @@ V_GUARDA       = 1.35   # m/s -- guarda de VELMAX: acima disto u = -1 (None desl
 
 # perfil de referencia: lista de (t [s], alvo [m/s]) ou (t, alvo, taxa [m/s^2]); None = rampa ate V_REF
 ROTEIRO = {
-	'avanco'     : dict(projeto='avanco',    ts=13.0, perfil=None),
-
-	'avanco_ff'  : dict(projeto='avanco_ff', ts=13.0, perfil=None),
-
-	'avanco_rt'  : dict(projeto='avanco_rt', ts=35.0, perfil=None),
-
-	'frenagem'   : dict(projeto='avanco',    ts=20.0, perfil=[(0, 1.0), (8, 0.5), (13, 0.0, 0.25)]),
-
+	'avanco'     : dict(projeto='avanco',    ts=13.0, perfil=None),   # lei escolhida (P + D + feedforward), rampa ate V_REF, ~15 m
+	'avanco_ff'  : dict(projeto='avanco_ff', ts=13.0, perfil=None),   # a mesma malha com o feedforward completo (K_FF, TAU_FF)
+	'avanco_rt'  : dict(projeto='avanco_rt', ts=35.0, perfil=None),   # a mesma rampa com a lei re-sintonizada (analise/sintonia.py)
+	'frenagem'   : dict(projeto='avanco',    ts=20.0, perfil=[(0, 1.0), (8, 0.5), (13, 0.0, 0.25)]),   # referencia DECRESCENTE, ~11 m: 1,0 > 0,5 rapido > 0 devagar
 	'frenagem_ff': dict(projeto='avanco_ff', ts=20.0, perfil=[(0, 1.0), (8, 0.5), (13, 0.0, 0.25)]),
-
 	'frenagem_rt': dict(projeto='avanco_rt', ts=20.0, perfil=[(0, 1.0), (8, 0.5), (13, 0.0, 0.25)]),
 
-	# subida: 17 s (a 1,3 m/s ~20 m: 5 de plano + rampa + topo; a 1,0 ~15 m). Fora do ajuste da planta (o disturbio
-	# enviesaria o K); a duracao diferente da do 'avanco' e o que separa os dois na analise.
+	# subida: parte ~5 m antes da rampa, V_REF que voce editar (1,0 ou 1,3). 17 s (a 1,3 m/s ~20 m: 5 de plano + rampa + topo; a 1,0 ~15 m).
+	# Fora do ajuste da planta (o disturbio enviesaria o K); a duracao diferente da do 'avanco' e o que separa os dois na analise.
 	'subida_ff'  : dict(projeto='avanco_ff', ts=17.0, perfil=None, subida=True, pista=24.0),
-
 	'subida_rt'  : dict(projeto='avanco_rt', ts=17.0, perfil=None, subida=True, pista=24.0),
 
-	# parada: cruzeiro em V_REF ate t = 8 s (~8 m a 1,3 m/s) e corta; 7 s depois para (ts). Lei 'avanco_rt'.
+	# parada: cruzeiro em V_REF ate t = 8 s (~8 m a 1,3 m/s) e CORTA (u = -1, vref 0: a mesma acao da emergencia do ADAS);
+	# mede a distancia e o tempo de parada. 7 s depois para (ts). Segurem o carro. Lei 'avanco_rt'.
 	'parada'     : dict(projeto='avanco_rt', ts=15.0, perfil=None, parada=8.0),
 
-	'sonar'      : dict(ts=72.0, sonar=[0.3, 0.5, 1.0, 2.0, 3.0, 4.0, 0.0]),   # distancias da caixa [m]; 0 = sem caixa
-
-	'u_degrau'   : dict(ts=30.0, aberto=[0.5, 0.8, 1.0, 1.0]),                 # niveis de u
-	
-	'patamares'  : dict(projeto='avanco',    ts=16.0,
+	'sonar'      : dict(ts=72.0, sonar=[0.3, 0.5, 1.0, 2.0, 3.0, 4.0, 0.0]),   # carro PARADO, alguem segura uma caixa nestas distancias [m] (0 = sem caixa); instrucoes no terminal
+	'u_degrau'   : dict(ts=30.0, aberto=[0.5, 0.8, 1.0, 1.0]),                 # malha ABERTA: niveis de u a partir do repouso (zona morta e atraso)
+	'patamares'  : dict(projeto='avanco',    ts=16.0,                          # degraus de referencia 0,6 > 0,9 > 1,1 > 0,8 > 0,5 m/s (separa ganho G de zona morta)
 	                    perfil=[(0, 0.6), (3.5, 0.9), (6.5, 1.1), (9.5, 0.8), (12, 0.5), (13.5, 0.0)]),
 }
 _E = ROTEIRO[ENSAIO]
 
 ########################################
 # SUPERVISOR ADAS (ultrassom): fica entre a referencia e a lei de controle (_adas, mais abaixo).
-# Os 3 valores entre as marcas sao PLACEHOLDERS ate rodar o ensaio 'sonar' e depois
-#     python analise/calibra_adas.py <pasta do sonar.csv> --aplica      (reescreve SO este bloco)
-# ADAS_ON so liga (--liga) depois de o supervisor ser testado no carro: por padrao a corrida nao muda.
+# Bloco entre as marcas: calibrado com o ensaio 'sonar' por  python analise/calibra_adas.py <sonar.csv> --aplica
 # >>> ADAS (calibra_adas.py)
 ADAS_ON        = True   # True = supervisor ligado
 SONAR_VIES     = 0.00   # m -- leitura menos distancia real (mediana de 0,5 a 2 m)
@@ -97,17 +74,14 @@ JANELA_AP      = 0.6    # s -- janela da reta d(t) que da a velocidade de aproxi
 RESET_AO_FREAR = True   # zera filtros e estados da lei enquanto freia (retomada sem estado velho); testa_adas.py compara
 
 ########################################
-# GANHOS. Planta (bateria > 90%): u -> servos.py integra no acelerador (9,46 graus/s por unidade de u)
-# -> zona morta e ganho do ESC -> atraso tau ~0,6-0,75 s -> car.v (media de 30 amostras, ~0,42 s).
-# K = dv/dt por unidade de u ~1,95-2,9.
-#   KP     [u por m/s de erro] ganho proporcional. A malha tem velocidade ~KP*K rad/s; o validado no
-#          carro e 0,55-0,6 (0,8 da 11-16% de sobressinal na simulacao). KP 0,2 da 0,39-0,58.
-#   TD     [s] tempo derivativo (0 desliga), derivada filtrada com TD/5
-#   TAU_VDES [s] filtro de 1a ordem da referencia
-#   K_FF   [m/s^2 por u] o K que o feedforward supoe. No 'avanco' vale 4 (acima do K real): o FF da so
-#          ~45% do acelerador de cruzeiro. No 'avanco_ff' vale 2,9, o MAIOR K medido, para o FF nunca
-#          empurrar mais que o carro precisa (com 1,95 num carro de K 2,9: 22% de sobressinal, simulado).
-#   TAU_FF [s] atraso da planta que o feedforward compensa (0 desliga). 0,61 s: ajuste de 01/10.
+# GANHOS. Planta (bateria > 90%): u -> servos.py integra no acelerador (9,46 graus/s por unidade de u) -> zona morta e ganho
+# do ESC -> atraso tau ~0,6-0,75 s -> car.v (media de 30 amostras, ~0,42 s). K = dv/dt por unidade de u ~1,95-2,9.
+#   KP [u por m/s de erro]  ganho proporcional; a malha tem velocidade ~KP*K rad/s (validado no carro: 0,55-0,6)
+#   TD [s]                  tempo derivativo (0 desliga); derivada filtrada com TD/5
+#   TAU_VDES [s]            filtro de 1a ordem da referencia
+#   K_FF [m/s^2 por u]      o K que o feedforward supoe: 4 no 'avanco' (acima do K real); 2,9 nos demais, o MAIOR K medido,
+#                           para o FF nunca empurrar mais que o carro precisa
+#   TAU_FF [s]              atraso da planta que o feedforward compensa (0 desliga); 0,61 s: ajuste de 01/10
 _PROJETOS = {
 	'avanco'   : dict(KP=0.2, TD=0.6, TAU_VDES=0.5, K_FF=4.0, TAU_FF=0.0),
 	'avanco_ff': dict(KP=0.2, TD=0.6, TAU_VDES=0.5, K_FF=2.9, TAU_FF=0.61),
@@ -164,12 +138,10 @@ def controlador_longitudinal(car, vdes_bruto):
 
 ########################################
 # SUPERVISOR ADAS
-#   camada de emergencia: d < d_gatilho(v) -> u = -1 e referencia 0, travado ate d > D_LIBERA (histerese)
-#   camada suave: vdes <= sqrt(2*A_PLAN*(d - D_PARADA)); e vdes <= V_CRUZ, a maior v cujo gatilho cabe no
-#   alcance confiavel do sensor. Ultrassom sem eco (valid = False) = caminho livre.
-#   velocidade de aproximacao v_ap (reta d(t)): o gatilho usa max(v, v_ap); com um lider que anda (v_lider = v - v_ap > 0,2)
-#   vale tambem vdes <= v_lider + K_ACC*(d - D_PARADA - TH_GAP*v) (distancia desejada cresce com a velocidade).
-#   Freando, a lei e zerada (_zera_lei) se RESET_AO_FREAR.
+#   emergencia: d < d_gatilho(v) -> u = -1 e referencia 0, travado ate d > D_LIBERA (histerese); freando, a lei e zerada
+#   camada suave: vdes <= sqrt(2*A_PLAN*(d - D_PARADA)) e vdes <= V_CRUZ (a maior v cujo gatilho cabe no alcance do sensor);
+#     com lider que anda (v_lider = v - v_ap > 0,2): vdes <= v_lider + K_ACC*(d - D_PARADA - TH_GAP*v)
+#   v_ap = velocidade de aproximacao (reta d(t)); o gatilho usa max(v, v_ap). Ultrassom sem eco (valid = False) = caminho livre.
 def _d_gatilho(v):
 	return v * T_REACAO + v * v / (2.0 * A_FREIO) + D_PARADA
 
@@ -222,7 +194,6 @@ def _adas(car, vdes):
 	if np.isfinite(d) and v_lider is not None and v_lider > 0.2:   # seguindo um lider que anda: distancia cresce com a velocidade
 		alvo = min(alvo, v_lider + K_ACC * (d - D_PARADA - TH_GAP * v))
 	s['v_out'] = min(alvo, s['v_out'] + TAXA_RAMPA_V * max(car.dt, 0.0))   # sobe devagar, desce na hora
-	s['v_out'] = min(s['v_out'], alvo)
 	_estado['adas_cod'] = 1 if s['v_out'] < vdes - 1e-3 else 0
 	return s['v_out'], False
 

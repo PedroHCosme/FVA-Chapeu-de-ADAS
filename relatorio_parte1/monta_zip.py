@@ -32,21 +32,17 @@ Documentacao do metodo: codigo/simulador/IDENTIFICACAO.md e CONTROLE_LONGITUDINA
 """
 
 
-def add(z, src, arc):
-    z.write(src, arc)
-
-
 with zipfile.ZipFile(OUT, 'w', zipfile.ZIP_DEFLATED) as z:
     z.writestr('LEIAME.txt', LEIAME)
-    add(z, os.path.join(AQUI, 'main.pdf'), 'relatorio.pdf')
+    z.write(os.path.join(AQUI, 'main.pdf'), 'relatorio.pdf')
     # fonte do relatorio
     for f in ('main.tex', 'numeros.tex', 'tab_aeb.tex', 'figuras_relatorio.py', 'numeros.txt'):
-        add(z, os.path.join(AQUI, f), f'relatorio_fonte/{f}')
+        z.write(os.path.join(AQUI, f), f'relatorio_fonte/{f}')
     for sub in ('secoes', 'imgs', 'logs'):
         for raiz, _, arqs in os.walk(os.path.join(AQUI, sub)):
             for a in arqs:
                 p = os.path.join(raiz, a)
-                add(z, p, 'relatorio_fonte/' + os.path.relpath(p, AQUI).replace(os.sep, '/'))
+                z.write(p, 'relatorio_fonte/' + os.path.relpath(p, AQUI).replace(os.sep, '/'))
     # codigo
     for pasta, destino in (('simulador', 'codigo/simulador'), ('veiculo_real', 'codigo/veiculo_real')):
         base = os.path.join(REPO, pasta)
@@ -58,5 +54,5 @@ with zipfile.ZipFile(OUT, 'w', zipfile.ZIP_DEFLATED) as z:
                 if a.endswith('.md') and a not in ('IDENTIFICACAO.md', 'CONTROLE_LONGITUDINAL.md'):
                     continue
                 p = os.path.join(raiz, a)
-                add(z, p, destino + '/' + os.path.relpath(p, base).replace(os.sep, '/'))
+                z.write(p, destino + '/' + os.path.relpath(p, base).replace(os.sep, '/'))
 print(OUT, round(os.path.getsize(OUT) / 1e6, 1), 'MB')

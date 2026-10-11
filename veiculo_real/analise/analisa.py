@@ -263,33 +263,11 @@ def bloco_rampa(x, E, mod, ajx):
          f"    travado em VELMAX              {m['trava']:.1f} s   (u = 0 com v > 1,5: o set_u zera u e o acelerador fica parado)",
          f"    IAE contra vref                {m['iae']:.2f} m",
          f"    u: max {m['umax']:+.2f}  min {m['umin']:+.2f}  saturado (|u| >= 0,99) {m['sat']:.1f}% do tempo   ruido de u (media |du|, ult. 3 s) {m['ruido']:.4f}"]
-    sug = []
     if ajx and mod:   # K x KP / K_FF: uma vez so, no bloco da planta (vale para a sessao toda)
         K = K_DE(ajx['G'])
         os_sim, st_sim = malha(mod, K, ajx['DB'], ajx['tau'], ajx['d'], ts=E['ts'])
         m['os_sim'] = os_sim
         L.append(f"    modelo ajustado previa (K {K:.2f} desta corrida): sobressinal {os_sim:.1f}%, acomoda +-5% em {st_sim:.1f} s   <- diferenca grande = modelo nao explica o carro")
-    if m['trava'] > 0:
-        sug.append("travou em VELMAX: com u = 0 o acelerador NAO desce (servos.py integra u) e o carro fica acima do alvo. "
-                   "Menos sobressinal (KP menor ou K_FF maior) ou V_REF mais baixo.")
-    if m['ultra'] > 5:
-        sug.append("sobressinal alto: reduza KP (menos ganho de malha) ou ative o derivativo (ENSAIO 'avanco': TD da margem de fase); TAU_VDES maior suaviza a referencia.")
-    if m['ultra'] < 0.5 and (np.isnan(m['a5']) or m['a5'] > 4.0):
-        sug.append("sem sobressinal e lento: ha folga para subir KP (ou 'avanco'); confira K medido acima.")
-    if m['partida'] > 1.5:
-        sug.append("partida > 1,5 s: zona morta grande (ou bateria fraca). Rode 'u_degrau' para medir DB; compensar a zona morta piorou o sobressinal na simulacao.")
-    if m['sat'] > 3:
-        sug.append("u saturou: reduza TAXA_RAMPA_V ou KP (a saturacao esconde o ganho real e degrada a margem de fase).")
-    if m['cruz'] >= 2 or m['ondula'] > 0.05:
-        sug.append("oscila em regime: reduza KP; se TD > 0, reduza TD (amplifica ruido).")
-    if m['ruido'] > 0.03:
-        sug.append("u muito ruidoso: se TD > 0, reduza TD ou aumente o filtro (TD/5).")
-    if abs(m['erro_final']) > 0.03:
-        sug.append("erro final != 0: o integrador de pwm (servos.py) zera o erro, entao veja 'travado em VELMAX', pwm no fim perto do teto "
-                   "(18 graus: subida) ou se o carro parou antes de acomodar.")
-    if sug:
-        L.append("    sugestoes:")
-        L += [f"      - {s}" for s in sug]
     return L
 
 
@@ -422,7 +400,7 @@ def ajuste_cego(grupo, i):
 
 
 # ---- relatorio -------------------------------------------------------------------------
-def figura(x, ident, mods, ajustado, texto):
+def figura(x, ident, mods, ajustado):
     fig, axs = plt.subplots(3, 1, figsize=(10, 9), sharex=True, layout='constrained')
     t, tg = x['t'], x['tg']
     axs[0].plot(t, x['v'], 'k', lw=2, label='v medido (MA30)')
@@ -504,9 +482,6 @@ def main():
         aj['K'] = float(np.median([K_DE(g) for g in aj['G']]))
         P(f"\n=== planta ajustada (corridas do grupo, DB/tau/d comuns, G por corrida) ===")
         P(f"  DB = {aj['DB']:.2f} graus   tau = {aj['tau']:.3f} s   d = {aj['d']:.3f} s   K = {aj['K']:.2f} m/s^2 por u   rmse = {aj['rmse']:.4f} m/s")
-        P("  DB  = zona morta do ESC: graus de acelerador (acima do neutro) que o carro precisa de antes de comecar a andar")
-        P("  G   = ganho: m/s de velocidade final por grau acima da DB  (v final = G x (pwm - DB));  K = G x 9,46 = m/s^2 por unidade de u")
-        P("  Uso: o K decide o ganho da malha (KP*K) e se o K_FF do 'avanco_ff' e seguro (abaixo); DB, tau e d entram nas simulacoes ('modelo previa').")
         # velocidades em que o carro ficou >= 1 s (patamares): so elas separam G de DB
         niveis = np.concatenate([np.round(x['vg'][x['vg'] > 0.15] / 0.1) * 0.1 for x in grupo])
         val, cont = np.unique(niveis, return_counts=True)
@@ -527,20 +502,10 @@ def main():
             mk = _MODS.get(nome)
             if mk is None:
                 continue
-            kpk = mk.KP * aj['K']
-            estado = ('MAIS RAPIDA que o projeto: mais sobressinal' if kpk > 0.65 else
-                      'mais lenta que o projeto (lado seguro)' if kpk < 0.45 else 'dentro do projeto')
-            P(f"  '{nome}': malha KP*K = {mk.KP}*{aj['K']:.2f} = {kpk:.2f} (projeto 0,55-0,6): {estado}")
-            if mk.TAU_FF:   # 'avanco_ff' e 'avanco_rt': o feedforward dimensionado para o K real
-                if aj['K'] <= mk.K_FF:
-                    msg = (f"feedforward do '{nome}' OK: K medido {aj['K']:.2f} <= K_FF {mk.K_FF} (dentro da faixa de projeto, bateria > 88%: "
-                           "o FF nunca empurra mais do que o carro precisa)")
-                else:
-                    msg = (f"ATENCAO: K medido {aj['K']:.2f} ACIMA da faixa de projeto (K_FF {mk.K_FF}, {100 * (aj['K'] / mk.K_FF - 1):.0f}% acima): "
-                           f"o '{nome}' tera mais sobressinal que o simulado (com K 3,5 a simulacao ainda da menos que o 'avanco'). "
-                           "Nao reajuste no dia: registre (foi a faixa de projeto que nao valeu).")
-                aj.setdefault('ff', msg)
-                P(f"     {msg}")
+            P(f"  '{nome}': malha KP*K = {mk.KP}*{aj['K']:.2f} = {mk.KP * aj['K']:.2f} (projeto 0,55-0,6)"
+              + (f";  K {'<=' if aj['K'] <= mk.K_FF else '>'} K_FF {mk.K_FF}" if mk.TAU_FF else ''))
+            if mk.TAU_FF and aj['K'] > mk.K_FF:   # o feedforward empurraria mais do que o carro precisa
+                aj.setdefault('ff', f"ATENCAO: K medido {aj['K']:.2f} acima do K_FF do '{nome}' ({mk.K_FF}): mais sobressinal que o simulado")
         # previsao por corrida
         P("\n=== previsao por corrida: rmse [m/s] (fit %) ===")
         P("  'ajustado agora' JA VIU todas as corridas (so mede o ajuste). 'ajustado sem esta' e a prova honesta: DB, tau e d das outras corridas; so o G e refeito aqui.")
@@ -611,7 +576,7 @@ def main():
     for x, pasta in zip(xs, pastas):
         i = next((k for k, g in enumerate(grupo) if g is x), None)
         ajx = dict(aj, G=aj['G'][i]) if (aj is not None and i is not None) else None
-        fig = figura(x, x['ensaio'], MODELOS, ajx, texto)
+        fig = figura(x, x['ensaio'], MODELOS, ajx)
         if Path(pasta).is_file():   # arvore ensaios/: os dados nao recebem arquivo gerado
             png, txt = SAIDA / f"{x['nome']}.png", SAIDA / f"{x['nome']}.txt"
         else:
