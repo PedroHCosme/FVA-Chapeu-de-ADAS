@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 ########################################
-# Disciplina: Topicos em Engenharia de Controle e Automacao IV (ENG075): 
+# Disciplina: Topicos em Engenharia de Controle e Automacao IV (ENG075):
 # Fundamentos de Veiculos Autonomos - 2026/2
 # Professores: Armando Alves Neto e Leonardo A. Mozelli
 # Cursos: Engenharia de Controle e Automacao
@@ -14,113 +14,224 @@ import numpy as np
 import matplotlib.pyplot as plt
 import threading
 import time
+import os
 
 ########################################
-# longitudinal controller for the REAL car. simulador/main.py's controller
-# does not transfer: here servos.py INTEGRATES u into the throttle PWM, so
-# u=0 holds the speed instead of coasting. Plant fitted on the logs of
-# 2026-09-24 (veiculo_real/dados*): u -> PWM integrator -> ESC deadband and
-# gain G -> lag tau -> car.v through a 30-sample moving average (~0.42 s at
-# the real ~29 ms loop). Designed for a (near) fully charged battery:
-# K = dv/dt per unit u ~1.6, tau ~0.25 s. A discharged battery lowers K
-# (0.9 seen with a half-empty one) -- the loop just gets slower.
-########################################
-K_NOM        = 1.6     # m/s^2 per unit u -- charged battery (fitted on runs 002634..003330)
-# K_NOM is the plant gain the controller ASSUMES (v_dot = K * u); the real K is what
-# analise/analisa.py prints as "K medido". What sets the loop speed is KP_eff = KP * K / K_NOM.
-# Runs of 2026-09-25: real K ~ 0.95-1.09 and plant lag tau ~ 0.7 s (not K 1.6 / tau 0.25), and the
-# 'avanco' preset (KP 0.8) worked well with K_NOM = 1.6: KP_eff = 0.55. K_NOM ABOVE the real K is
-# the safe side (slower loop, no overshoot). Simulated on the fitted plant (tau 0.715, DB 3.95),
-# overshoot of the 'avanco' law:
-#     K real   K_NOM 1.6 (KP_eff)    K_NOM = K real    K_NOM ~1.4 x K real
-#     0.9-1.09   0-1.2%  (0.55)        13-16%            (not needed)
-#     1.4        8.5%    (0.70)        15%               K_NOM 2.0 -> 0.8%
-#     1.6        13.8%   (0.80)        13.8%             K_NOM 2.3 -> 0.3%
-#     2.0        24.7%   (1.00)        11%               K_NOM 2.6 -> 1.1%
-# So: keep 1.6 while the measured K stays <= ~1.2. If it comes back HIGHER (fresh battery, K >=
-# ~1.4 as on 2026-09-24), raise K_NOM to ~1.4 x K (aim at KP_eff ~ 0.55), NOT to K itself: with
-# the slow plant K_NOM = K leaves KP_eff = 0.8, too fast (13-16% overshoot). analisa.py simulates
-# the candidates and prints the choice. A higher K_NOM also weakens the feedforward (u_ff = rate / K_NOM).
-# The simulation under-predicts the real 'avanco' overshoot by ~3 points (sim 1.2%, car 4-6%).
-V_REF        = 1.3      # m/s -- cruise speed target
-TAXA_RAMPA_V = 0.9     # m/s^2 -- ramp-up rate for vdes
+# ENSAIO: troque SO esta linha entre as corridas (este e o unico arquivo copiado para o carro).
+#   'avanco'      lei escolhida (P + D + feedforward), rampa ate V_REF, ~15 m
+#   'avanco_ff'   a mesma malha com o feedforward completo (K_FF, TAU_FF): o A/B contra o 'avanco'
+#   'frenagem'    'avanco' seguindo referencia DECRESCENTE, ~11 m: 1,0 -> 0,5 rapido -> 0 devagar
+#   'frenagem_ff' o mesmo com a lei 'avanco_ff'
+#   'avanco_rt'   a mesma rampa com a lei re-sintonizada (analise/sintonia.py): 3o candidato do A/B
+#   'frenagem_rt' a 'frenagem' com a lei 'avanco_rt'
+#   'subida_ff'   SUBIDA: parte ~5 m antes da rampa, V_REF que voce editar (1,0 ou 1,3); lei 'avanco_ff'
+#   'subida_rt'   o mesmo com a lei 'avanco_rt'
+#   'parada'      rampa ate V_REF, cruzeiro e, em T_PARADA s, CORTA (u = -1, vref 0): mede a distancia e o tempo de
+#                 parada a partir da velocidade de cruzeiro (a mesma acao da emergencia do ADAS). Segurem o carro
+#   'sonar'       carro PARADO, alguem segura uma caixa na frente do ultrassom (instrucoes no terminal)
+#   'u_degrau'    malha ABERTA: u constante a partir do repouso (zona morta e atraso)
+#   'patamares'   degraus de referencia 0,6 > 0,9 > 1,1 > 0,8 > 0,5 m/s (separa ganho G de zona morta)
+# Toda corrida grava car.csv e sonar.csv (leitura do ultrassom). Analise: analise/ROTEIRO.md.
+ENSAIO = 'avanco_rt'
 
-########################################
-# TEST SCRIPT. To switch test runs change ONLY this line (everything lives in
-# this file on purpose: it is the one file that is copied to the car).
-#   'base'      controller of the chapter (FF + P) on a ramp to 1 m/s.
-#   'patamares' same controller, reference in steps 0.6 > 0.9 > 1.1 > 0.8 > 0.5 m/s:
-#               separates gain G from deadband DB in the analysis.
-#   'u_degrau'  OPEN LOOP: constant u = 0.3, 0.5, 0.8 from rest, one after the other
-#               (measures deadband DB and delay d from the start time, t = DB/(9.46 u) + d).
-#   'avanco'    same as 'base' plus the derivative term (see _PROJETOS).
-#   'v_alta'    'base' cruising at 1.3 m/s.
-#   'auto'      the preset that analisa.py printed (paste it into _PROJETOS['auto']).
-#   'frenagem'  'avanco' following a DECREASING reference: holds 1.0 m/s long enough for the slow
-#               car to get there and settle, then steps down 1.0 > 0.6 > (up) 1.0 > 0.6 slowly
-#               > 0.2 > 0 with different slew rates. Tests what the professor calls braking.
-#   'freio_esc' EXPLORATORY, hardware risk: does the ESC brake actively when the throttle goes
-#               BELOW neutral in forward gear? See _freio_esc. Not run on the car yet.
-# Then: python analise/analisa.py   (on the PC, after copying the new log folder).
-ENSAIO = 'avanco'   # 'base', 'patamares', 'u_degrau', 'avanco', 'v_alta', 'auto', 'frenagem', 'freio_esc'
+V_REF          = 1.3   # m/s -- alvo das rampas
+TAXA_RAMPA_V   = 0.9    # m/s^2 -- inclinacao da rampa de referencia
+PISTA_M        = 500   # m -- pista disponivel; o ensaio se recusa a rodar se passar de PISTA_M - 1
+ATRASO_PARTIDA = 1.0    # s -- tempo ate o carro sair do lugar (zona morta), so para estimar a distancia
+V_CORTE        = 0.7    # m/s -- 'u_degrau' para de acelerar aqui...
+PWM_CORTE      = 8.0    # graus -- ...ou quando o acelerador estimado chega aqui
+T_SONAR        = 10.0   # s -- 'sonar': tempo da caixa em cada distancia
+V_GUARDA       = 1.35   # m/s -- guarda de VELMAX: acima disto u = -1 (None desliga). Escolhida em analise/sintonia.py
 
-PISTA_M        = 100000000   # m of straight track available
-ATRASO_PARTIDA = 1.0    # s -- the car needs about this long to start moving (deadband)
-V_CORTE        = 0.7    # m/s -- 'u_degrau' stops accelerating here (measured; MA30 lags ~0.4 s and the
-                        #        throttle keeps rising meanwhile, so the real peak is ~1.1 m/s)
-PWM_CORTE      = 8.0    # deg -- ... or when the estimated throttle gets here (v_ss ~ 1 m/s), whichever first
-
-V_FREIO        = 0.8    # m/s -- speed the 'freio_esc' test brakes from
-T_SOBE         = 10.0   # s -- 'freio_esc': time allowed to reach V_FREIO from rest (the car is slow: ~1.5 s
-                        #      of deadband + ~4 s to rise, see the straight-line runs of 2026-09-25)
-T_PULSO        = 0.8    # s -- 'freio_esc': longest time the throttle stays below neutral (released earlier at v < 0.15)
-
-# vref profile = list of (t [s], target [m/s]) or (t, target, slew rate [m/s^2]); vdes slews toward the
-# target at TAXA_RAMPA_V unless the step gives its own rate. None = ramp to V_REF and hold (the validated
-# 'base' reference). Steps are spaced >= 6-7 s: the car needs ~4 s to settle after a step (tau ~0.7 s + MA30).
+# perfil de referencia: lista de (t [s], alvo [m/s]) ou (t, alvo, taxa [m/s^2]); None = rampa ate V_REF
 ROTEIRO = {
-	'base'     : dict(projeto='base',   perfil=None, ts=30000.0),
-	'avanco'   : dict(projeto='avanco', perfil=None, ts=40.0),
-	'auto'     : dict(projeto='auto',   perfil=None, ts=3000000.0),
-	'v_alta'   : dict(projeto='base',   perfil=None, ts=30.0, vref=2.0),
-	'patamares': dict(projeto='base',   ts=90.5,
-	                  perfil=[(0, 0.6), (3.5, 0.9), (6.5, 1.1), (9.5, 0.8), (12, 0.5), (13.5, 0.0)]),
-	'u_degrau' : dict(aberto=[0.5, 0.8, 1.3, 1.8], ts=30.0),
-	# reach 1.0 (t = 0-13: ~5 s to get there + settling), step down -0.4 fast, back up, step down -0.4 at only
-	# 0.25 m/s^2, -0.4 fast to 0.2, stop. ~32 m.
-	'frenagem' : dict(projeto='avanco', ts=50.0,
-	                  perfil=[(0, 1.0), (13, 0.6), (20, 1.0), (27, 0.6, 0.25), (34, 0.2), (41, 0.0)]),
-	# throttle pulse below neutral (deg) applied after the throttle is drained; 0 = plain coasting control
-	'freio_esc': dict(projeto='avanco', freio=[0, 6, 12, 18], ts=80.0),
+	'avanco'     : dict(projeto='avanco',    ts=13.0, perfil=None),
+
+	'avanco_ff'  : dict(projeto='avanco_ff', ts=13.0, perfil=None),
+
+	'avanco_rt'  : dict(projeto='avanco_rt', ts=35.0, perfil=None),
+
+	'frenagem'   : dict(projeto='avanco',    ts=20.0, perfil=[(0, 1.0), (8, 0.5), (13, 0.0, 0.25)]),
+
+	'frenagem_ff': dict(projeto='avanco_ff', ts=20.0, perfil=[(0, 1.0), (8, 0.5), (13, 0.0, 0.25)]),
+
+	'frenagem_rt': dict(projeto='avanco_rt', ts=20.0, perfil=[(0, 1.0), (8, 0.5), (13, 0.0, 0.25)]),
+
+	# subida: 17 s (a 1,3 m/s ~20 m: 5 de plano + rampa + topo; a 1,0 ~15 m). Fora do ajuste da planta (o disturbio
+	# enviesaria o K); a duracao diferente da do 'avanco' e o que separa os dois na analise.
+	'subida_ff'  : dict(projeto='avanco_ff', ts=17.0, perfil=None, subida=True, pista=24.0),
+
+	'subida_rt'  : dict(projeto='avanco_rt', ts=17.0, perfil=None, subida=True, pista=24.0),
+
+	# parada: cruzeiro em V_REF ate t = 8 s (~8 m a 1,3 m/s) e corta; 7 s depois para (ts). Lei 'avanco_rt'.
+	'parada'     : dict(projeto='avanco_rt', ts=15.0, perfil=None, parada=8.0),
+
+	'sonar'      : dict(ts=72.0, sonar=[0.3, 0.5, 1.0, 2.0, 3.0, 4.0, 0.0]),   # distancias da caixa [m]; 0 = sem caixa
+
+	'u_degrau'   : dict(ts=30.0, aberto=[0.5, 0.8, 1.0, 1.0]),                 # niveis de u
+	
+	'patamares'  : dict(projeto='avanco',    ts=16.0,
+	                    perfil=[(0, 0.6), (3.5, 0.9), (6.5, 1.1), (9.5, 0.8), (12, 0.5), (13.5, 0.0)]),
 }
 _E = ROTEIRO[ENSAIO]
-V_REF = _E.get('vref', V_REF)
 
-# Tuning presets (names are used by ROTEIRO):
-#   'base'   P + reference feedforward. The design of the chapter: phase margin
-#            67 deg nominal, 56 deg at K=2.0 tau=0.4.
-#   'avanco' the same law plus a derivative (lead) term on the error. Found in
-#            simulation only (matlab-control/): phase margin 68 deg at K=2.0
-#            tau=0.4, faster settling. Tested on the car 2026-09-25 (straight line
-#            and ramps): overshoot 4-6%, RMS error 0.02 m/s. This is the chosen one.
-#   'auto'   starts equal to 'base'; analisa.py prints the line to paste here.
-# TD_DERIV = 0 makes the law identical to 'base' for any KP_MOD / TAU_VDES.
+########################################
+# SUPERVISOR ADAS (ultrassom): fica entre a referencia e a lei de controle (_adas, mais abaixo).
+# Os 3 valores entre as marcas sao PLACEHOLDERS ate rodar o ensaio 'sonar' e depois
+#     python analise/calibra_adas.py <pasta do sonar.csv> --aplica      (reescreve SO este bloco)
+# ADAS_ON so liga (--liga) depois de o supervisor ser testado no carro: por padrao a corrida nao muda.
+# >>> ADAS (calibra_adas.py)
+ADAS_ON        = True   # True = supervisor ligado
+SONAR_VIES     = 0.00   # m -- leitura menos distancia real (mediana de 0,5 a 2 m)
+SONAR_RUIDO    = 0.005  # m -- desvio das leituras [20260930_222919]
+SONAR_ALCANCE  = 2.900  # m -- maior distancia com >= 90% de leituras validas e erro < 0,10 m [20260930_222919]
+# <<< ADAS
+A_FREIO        = 0.5    # m/s^2 -- desaceleracao so por atrito. Medido (analise/parada.py): 0,52-0,59 a 0,8 m/s, 0,67 a 1,34 m/s
+T_REACAO       = 0.7    # s -- do corte (u = -1) ate a velocidade cair 5%. Medido: 0,40-0,55 s a 0,8 m/s, 0,43 s a 1,34 m/s (+ folga)
+D_PARADA       = 0.1   # m -- folga entre o para-choque e o obstaculo, parado
+A_PLAN         = 0.30   # m/s^2 -- a camada suave planeja frear com isto (< A_FREIO: sobra margem)
+D_LIBERA       = 1.5    # m -- parado por obstaculo, so volta a andar quando a distancia passar disto (ou livre)
+TH_GAP         = 1.0    # s -- seguindo um lider em movimento: distancia desejada = D_PARADA + TH_GAP * v
+K_ACC          = 0.4    # 1/s -- vdes <= v_lider + K_ACC * (d - distancia desejada)
+JANELA_AP      = 0.6    # s -- janela da reta d(t) que da a velocidade de aproximacao (ultrassom a 10 Hz: ~6 leituras)
+RESET_AO_FREAR = True   # zera filtros e estados da lei enquanto freia (retomada sem estado velho); testa_adas.py compara
+
+########################################
+# GANHOS. Planta (bateria > 90%): u -> servos.py integra no acelerador (9,46 graus/s por unidade de u)
+# -> zona morta e ganho do ESC -> atraso tau ~0,6-0,75 s -> car.v (media de 30 amostras, ~0,42 s).
+# K = dv/dt por unidade de u ~1,95-2,9.
+#   KP     [u por m/s de erro] ganho proporcional. A malha tem velocidade ~KP*K rad/s; o validado no
+#          carro e 0,55-0,6 (0,8 da 11-16% de sobressinal na simulacao). KP 0,2 da 0,39-0,58.
+#   TD     [s] tempo derivativo (0 desliga), derivada filtrada com TD/5
+#   TAU_VDES [s] filtro de 1a ordem da referencia
+#   K_FF   [m/s^2 por u] o K que o feedforward supoe. No 'avanco' vale 4 (acima do K real): o FF da so
+#          ~45% do acelerador de cruzeiro. No 'avanco_ff' vale 2,9, o MAIOR K medido, para o FF nunca
+#          empurrar mais que o carro precisa (com 1,95 num carro de K 2,9: 22% de sobressinal, simulado).
+#   TAU_FF [s] atraso da planta que o feedforward compensa (0 desliga). 0,61 s: ajuste de 01/10.
 _PROJETOS = {
-	'base'  : dict(KP=0.6, TD=0.0, TAU_VDES=0.3),
-	'avanco': dict(KP=0.8, TD=0.6, TAU_VDES=0.5),
-	'auto'  : dict(KP=0.5, TD=0.8, TAU_VDES=0.3, K_NOM=1.09),
+	'avanco'   : dict(KP=0.2, TD=0.6, TAU_VDES=0.5, K_FF=4.0, TAU_FF=0.0),
+	'avanco_ff': dict(KP=0.2, TD=0.6, TAU_VDES=0.5, K_FF=2.9, TAU_FF=0.61),
+	'avanco_rt': dict(KP=0.225, TD=0.6, TAU_VDES=0.2, K_FF=2.9, TAU_FF=0.61),   # analise/sintonia.py, ponto #5, V_GUARDA 1,35 (02/10)
 }
-PROJETO      = _E.get('projeto', 'base')
-K_NOM        = _PROJETOS[PROJETO].get('K_NOM', K_NOM)  # m/s^2 per unit u
-KP_MOD       = _PROJETOS[PROJETO]['KP']        # rad/s -- P gain
-TD_DERIV     = _PROJETOS[PROJETO]['TD']        # s -- derivative time on the error (0 = off)
-TAU_VDES     = _PROJETOS[PROJETO]['TAU_VDES']  # s -- low-pass filter on the reference
+PROJETO = _E.get('projeto', 'avanco')
+KP, TD, TAU_VDES, K_FF, TAU_FF = (_PROJETOS[PROJETO][k] for k in ('KP', 'TD', 'TAU_VDES', 'K_FF', 'TAU_FF'))
 
+_estado = {}                          # memoria do controlador e dos ensaios entre chamadas
+_vdes_filt = AlphaFilter(alpha=1.0)   # alpha recalculado a cada chamada com car.dt
+
+########################################
+# LEI DE CONTROLE (u = aceleracao pedida ao car.set_u, saturada em +-1)
+#
+#   u = KP*e + KP*TD*de/dt + (dvdes/dt + TAU_FF*d2vdes/dt2) / K_FF      e = MA30(vdes) - v
+#
+# Como o servos.py integra u, no acelerador esta MESMA lei e um PI + feedforward estatico:
+# Ki = 9,46*KP, Kp = 9,46*KP*TD e 9,46*vdes/K_FF graus (analise/prova_integrador.py). Malha tipo 1:
+# erro zero em regime para referencia constante. O feedforward fica fora da malha: K_FF e TAU_FF
+# nao mexem nas margens.
+def controlador_longitudinal(car, vdes_bruto):
+
+	# referencia filtrada; a derivada dela alimenta o feedforward
+	if car.dt > 0:
+		_vdes_filt.alpha = np.clip(car.dt / TAU_VDES, 0.0, 1.0)
+	vdes_anterior = _vdes_filt.value
+	vdes = _vdes_filt.filter(vdes_bruto)
+	dvdes_dt = (vdes_bruto - vdes_anterior) / TAU_VDES
+
+	# erro contra a referencia atrasada pela MESMA media movel do car.v: o P nao reage ao atraso do sensor
+	vdes_ma = _estado.setdefault('vdes_ma', MovingAverage(n=car.v_filt.n))
+	erro = vdes_ma.filter(vdes) - car.v
+
+	# derivada do erro filtrada com TD/5 (devolve a fase que a media movel tira)
+	derro_dt = 0.0
+	if TD > 0.0 and car.dt > 0:
+		b = car.dt / (TD / 5.0 + car.dt)
+		derro_dt = _estado.get('derro', 0.0)
+		derro_dt += b * ((erro - _estado.get('erro_ant', erro)) / car.dt - derro_dt)
+		_estado['derro'], _estado['erro_ant'] = derro_dt, erro
+
+	# segunda derivada da referencia, so quando o feedforward compensa o atraso da planta
+	d2vdes_dt2 = 0.0
+	if TAU_FF > 0.0 and car.dt > 0:
+		d2vdes_dt2 = (dvdes_dt - _estado.get('dvdes_ant', dvdes_dt)) / car.dt
+		_estado['dvdes_ant'] = dvdes_dt
+
+	u = KP * erro + KP * TD * derro_dt + (dvdes_dt + TAU_FF * d2vdes_dt2) / K_FF
+	# guarda de VELMAX: acima de 1,5 o car.py zera u e, como o servos.py integra u, o acelerador CONGELA
+	# (no topo de uma subida a 1,3 m/s o carro ficaria preso a ~1,8 m/s). Tira acelerador antes disso.
+	if V_GUARDA is not None and car.v > V_GUARDA:
+		u = -1.0
+	return float(np.clip(u, -1.0, 1.0))   # u < 0 baixa o acelerador (o carro so desacelera por atrito)
+
+########################################
+# SUPERVISOR ADAS
+#   camada de emergencia: d < d_gatilho(v) -> u = -1 e referencia 0, travado ate d > D_LIBERA (histerese)
+#   camada suave: vdes <= sqrt(2*A_PLAN*(d - D_PARADA)); e vdes <= V_CRUZ, a maior v cujo gatilho cabe no
+#   alcance confiavel do sensor. Ultrassom sem eco (valid = False) = caminho livre.
+#   velocidade de aproximacao v_ap (reta d(t)): o gatilho usa max(v, v_ap); com um lider que anda (v_lider = v - v_ap > 0,2)
+#   vale tambem vdes <= v_lider + K_ACC*(d - D_PARADA - TH_GAP*v) (distancia desejada cresce com a velocidade).
+#   Freando, a lei e zerada (_zera_lei) se RESET_AO_FREAR.
+def _d_gatilho(v):
+	return v * T_REACAO + v * v / (2.0 * A_FREIO) + D_PARADA
+
+def _v_cruzeiro(alcance):
+	return A_FREIO * (-T_REACAO + np.sqrt(T_REACAO ** 2 + 2.0 * (alcance - D_PARADA) / A_FREIO))
+
+V_CRUZ = _v_cruzeiro(SONAR_ALCANCE)
+
+def _zera_lei():
+	# filtros da referencia e estados da derivada voltam a zero: a retomada nao parte de estado velho
+	_vdes_filt.reset(0.0)
+	if 'vdes_ma' in _estado:
+		_estado['vdes_ma'].reset(0.0)
+	for k in ('derro', 'erro_ant', 'dvdes_ant'):
+		_estado.pop(k, None)
+
+def _adas(car, vdes):
+	# devolve (vdes, frear); o sensor chega em _estado['sonar'] = (d, valid) a cada ciclo
+	s = _estado.setdefault('adas', dict(buf=[], hist=[], frear=False, v_out=0.0, ult=(-1e9, 0.0)))
+	d_lido, valido = _estado.get('sonar', (4.0, False))
+	if valido:
+		d = d_lido - SONAR_VIES
+		s['ult'] = (car.t, d)
+	elif car.t - s['ult'][0] < 1.0 and s['ult'][1] < 1.0:
+		d = s['ult'][1]                       # sumiu o eco colado no obstaculo: segura a ultima leitura
+	else:
+		d = np.inf
+	# mediana de ~0,35 s (3 leituras do sensor a 10 Hz): rejeita eco espurio
+	s['hist'] = [(t, x) for t, x in s['hist'] if car.t - t < JANELA_AP] + ([(car.t, d)] if np.isfinite(d) else [])
+	s['buf'] = [(t, x) for t, x in s['buf'] if car.t - t < 0.35] + [(car.t, d)]
+	d = float(np.median([x for _, x in s['buf']])) - 2.0 * SONAR_RUIDO
+	v = max(car.v, 0.0)
+	# velocidade de aproximacao = -inclinacao da reta d(t) nas ultimas JANELA_AP s (estatico: ~v; lider se afastando: menor)
+	v_ap, v_lider = 0.0, None
+	h = s['hist']
+	if len(h) >= 4 and h[-1][0] - h[0][0] >= 0.5 * JANELA_AP:
+		tt, dd = np.array(h).T
+		v_ap = -float(np.polyfit(tt - tt[-1], dd, 1)[0])
+		v_lider = max(v - v_ap, 0.0)         # velocidade do lider (obstaculo que anda)
+	v_g = max(v, v_ap)                         # o gatilho vale para o mais rapido dos dois: nunca mais tarde que so com car.v
+	if not s['frear'] and v > 0.05 and d < _d_gatilho(v_g):
+		s['frear'] = True
+	elif s['frear'] and d > D_LIBERA and d > _d_gatilho(v) + 0.3:
+		s['frear'] = False
+	if s['frear']:
+		s['v_out'] = 0.0
+		_estado['adas_cod'] = 2
+		return 0.0, True
+	alvo = min(vdes, V_CRUZ, float(np.sqrt(2.0 * A_PLAN * max(d - D_PARADA, 0.0))) if np.isfinite(d) else vdes)
+	if np.isfinite(d) and v_lider is not None and v_lider > 0.2:   # seguindo um lider que anda: distancia cresce com a velocidade
+		alvo = min(alvo, v_lider + K_ACC * (d - D_PARADA - TH_GAP * v))
+	s['v_out'] = min(alvo, s['v_out'] + TAXA_RAMPA_V * max(car.dt, 0.0))   # sobe devagar, desce na hora
+	s['v_out'] = min(s['v_out'], alvo)
+	_estado['adas_cod'] = 1 if s['v_out'] < vdes - 1e-3 else 0
+	return s['v_out'], False
+
+########################################
+# referencia e ensaios
 def _pontos(perfil, taxa):
-	# breakpoints (t, v) of the reference: it slews to each target at `taxa` and is
-	# cut when the next step starts
+	# vertices (t, v) do perfil: cada alvo e alcancado com a taxa dada, ate o proximo comecar
 	pts = [(0.0, 0.0)]
-	for t_i, alvo, *r in perfil:   # optional 3rd item: slew rate of this step
+	for t_i, alvo, *r in perfil:
 		v_i = float(np.interp(t_i, *zip(*pts)))
 		pts = [p for p in pts if p[0] < t_i] + [(t_i, v_i), (t_i + abs(alvo - v_i) / (r[0] if r else taxa), alvo)]
 	return pts
@@ -128,29 +239,26 @@ def _pontos(perfil, taxa):
 _PONTOS = _pontos(_E['perfil'], TAXA_RAMPA_V) if _E.get('perfil') else None
 
 def _vdes(tau):
-	# reference at tau seconds after the first control call
+	# referencia tau segundos depois da primeira chamada do controle
+	if 'parada' in _E and tau >= _E['parada']:
+		return 0.0
 	if _PONTOS is None:
 		return min(V_REF, TAXA_RAMPA_V * tau)
 	return float(np.interp(tau, *zip(*_PONTOS)))
 
 def _confere_pista():
-	# rough distance travelled = integral of the reference delayed by the startup;
-	# refuse to run a profile that does not fit the track
-	if 'freio' in _E:   # per level: climb to V_FREIO, coast while the throttle drains, stop
-		return len(_E['freio']) * (V_FREIO * (T_SOBE - 2.0) + 3.0)
+	# distancia aproximada = integral da referencia atrasada pela partida; recusa o que nao cabe na pista
+	pista = _E.get('pista', PISTA_M)   # a subida tem pista propria (plano + rampa + topo)
 	t = np.arange(0.0, _E['ts'], 0.01)
-	v = np.array([_vdes(x - ATRASO_PARTIDA) if x > ATRASO_PARTIDA else 0.0 for x in t])
-	dist = float(v.sum() * 0.01)
-	if dist > PISTA_M - 1.0:   # 1 m left for the stop
-		raise ValueError(f"ensaio '{ENSAIO}' anda ~{dist:.1f} m, pista de {PISTA_M} m")
+	dist = 0.01 * sum(_vdes(x - ATRASO_PARTIDA) for x in t if x > ATRASO_PARTIDA)
+	if dist > pista - 1.0:
+		raise ValueError(f"ensaio '{ENSAIO}' anda ~{dist:.1f} m, pista de {pista} m")
 	return dist
 
-# open-loop test state lives in _estado too
-def _u_aberto(car, s):
-	# u constant per level from rest until v >= V_CORTE (or pwm >= PWM_CORTE), then u = -1 until the throttle
-	# is back to zero (u = 0 would HOLD the speed here: servos.py integrates u),
-	# then wait for the car to stop before the next level. Never leaves forward gear.
-	k_pwm = np.rad2deg(0.4 * 0.08 * 5.16)   # deg/s of throttle per unit u (servos.py, car.py)
+def _u_degrau(car, s):
+	# cada nivel de u a partir do repouso ate v >= V_CORTE (ou acelerador estimado >= PWM_CORTE); depois
+	# u = -1 ate o acelerador zerar (u = 0 SEGURARIA a velocidade: o servos.py integra u) e espera parar
+	k_pwm = np.rad2deg(0.4 * 0.08 * 5.16)   # graus/s de acelerador por unidade de u
 	dt = car.dt if 0.0 < car.dt < 0.5 else 0.0
 	s.setdefault('fase', 'espera'); s.setdefault('i', 0); s.setdefault('pwm', 0.0)
 	s['tf'] = s.get('tf', 0.0) + dt
@@ -159,157 +267,60 @@ def _u_aberto(car, s):
 	niveis = _E['aberto']
 	if s['fase'] == 'espera':
 		if s['tf'] > 1.0 and abs(car.v) < 0.05 or s['tf'] > 4.0:
-			if s['i'] < len(niveis):
-				vai('sobe')
-			else:
-				vai('fim')
+			vai('sobe' if s['i'] < len(niveis) else 'fim')
 		return 0.0
 	if s['fase'] == 'sobe':
-		u = min(niveis[s['i']], 1.0)   # set_u clips at +-1: the pwm estimate below must see the same u
+		u = min(niveis[s['i']], 1.0)
 		s['pwm'] = min(s['pwm'] + k_pwm * u * dt, 25.0)
 		if car.v >= V_CORTE or s['pwm'] >= PWM_CORTE or s['tf'] > 6.0:
 			vai('desce')
 		return u
 	if s['fase'] == 'desce':
 		s['pwm'] = max(s['pwm'] - k_pwm * dt, 0.0)
-		if s['pwm'] <= 0.0 and s['tf'] > 0.3:   # servos.py clips the throttle at 0
+		if s['pwm'] <= 0.0 and s['tf'] > 0.3:
 			s['i'] += 1
 			vai('espera')
 		return -1.0
 	return 0.0
 
-# controller memory between calls (ramp start, reference moving average,
-# derivative state)
-_estado = {}
-_vdes_filt = AlphaFilter(alpha=1.0)   # alpha set every call from car.dt
-
-########################################
-# CONTROL LAW (what every closed-loop ENSAIO runs; only the gains change)
-#
-#   u = u_p + u_d + u_ff          then clipped to [-1, 1]
-#
-#   u_p  = KP / K_NOM * e                    proportional on the tracking error
-#   u_d  = KP * TD / K_NOM * de/dt           derivative (lead) on the error, TD = 0 turns it off
-#   u_ff = (dvdes/dt) / K_NOM                feedforward of the (filtered) reference rate
-#
-#   e    = MA30(vdes) - v                    vdes = TAU_VDES low-pass of the raw ramp/steps
-#                                            v    = car.v, already a 30-sample moving average
-#
-# Type: reference feedforward + P (+ filtered D), NO integral, 2 degrees of freedom (the
-# reference enters both through the feedforward and through the error). The plant already
-# integrates u into the throttle PWM (servos.py), so the loop is type 1 and needs no
-# controller integrator for zero steady-state error to a constant reference. The
-# ESC deadband, battery sag and slopes all enter AFTER that integrator.
-# Loop stability depends only on C = KP / K_NOM (and TD); K_NOM also sets the feedforward
-# scale: a K_NOM below the real K makes both the loop and the feedforward stronger.
-def controlador_longitudinal(car, vdes_bruto):
-
-	# ---- reference: low-pass of the raw reference (its own derivative is the feedforward)
-	if car.dt > 0:
-		_vdes_filt.alpha = np.clip(car.dt / TAU_VDES, 0.0, 1.0)
-	vdes_anterior = _vdes_filt.value
-	vdes = _vdes_filt.filter(vdes_bruto)
-	dvdes_dt = (vdes_bruto - vdes_anterior) / TAU_VDES   # [m/s^2]
-
-	# ---- tracking error, against the reference delayed by the SAME moving average car.v
-	# goes through (car.py v_filt): P reacts to real tracking error, not to the sensor delay
-	vdes_ma = _estado.setdefault('vdes_ma', MovingAverage(n=car.v_filt.n))
-	erro = vdes_ma.filter(vdes) - car.v                  # [m/s]
-
-	# ---- derivative of the error, low-passed with TD/5 to keep the noise down. It gives
-	# back the phase the moving average takes away, so KP can be higher. 0 when TD = 0.
-	derro_dt = 0.0                                       # [m/s^2]
-	if TD_DERIV > 0.0 and car.dt > 0:
-		b = car.dt / (TD_DERIV / 5.0 + car.dt)
-		derro_dt = _estado.get('derro', 0.0)
-		derro_dt += b * ((erro - _estado.get('erro_ant', erro)) / car.dt - derro_dt)
-		_estado['derro'], _estado['erro_ant'] = derro_dt, erro
-
-	# ---- the three terms, each one already in units of u
-	u_p  = KP_MOD * erro / K_NOM
-	u_d  = KP_MOD * TD_DERIV * derro_dt / K_NOM
-	u_ff = dvdes_dt / K_NOM
-
-	# ---- the law is only the sum. u < 0 is how the throttle comes back down (coasting,
-	# not braking). No friction feedforward: friction is inside the PWM->speed curve here.
-	u = u_p + u_d + u_ff
-	return float(np.clip(u, -1.0, 1.0))
-
-########################################
-# EXPLORATORY 'freio_esc' -- NOT run on the car yet; hardware risk, run it with someone holding the car.
-# Question: servos.py never commands the throttle below neutral in forward gear (th_pwm >= 0), so the
-# car only COASTS. _backward() taps the ESC below neutral four times, the usual brake/reverse
-# sequence of hobby ESCs, so a pulse below neutral may brake. servos._set_pwm adds trim_throttle
-# (rad) to the command and its forward clip allows 18 deg below neutral, so the test shifts the trim
-# for a short pulse while the throttle is at 0. Per level in _E['freio'] (deg below neutral):
-#   sobe   avanco controller to V_FREIO from rest (T_SOBE s)
-#   drena  u = -1 until the estimated throttle is 0 (the car coasts)
-#   pulso  trim = -level for at most T_PULSO s, released early at v < 0.15 (an ESC can go into
-#          REVERSE if the pulse outlasts the stop; v is signed, v < 0 would show it)
-#   espera trim = 0, wait until the car is stopped
-# The log has no trim column, so vref carries the marker: -0.01 while draining, -max(level/10, 0.02)
-# during the pulse (level 0 = plain coasting control), 0 while waiting. analisa.py reads it.
-def _aplica_trim(car, graus):
-	a = getattr(car, 'atuador', None)
-	if a is not None:
-		a.trim_throttle = -np.deg2rad(graus)
-
-def _freio_esc(car, s):
-	k_pwm = np.rad2deg(0.4 * 0.08 * 5.16)   # deg/s of throttle per unit u (servos.py, car.py)
-	dt = car.dt if 0.0 < car.dt < 0.5 else 0.0
-	s.setdefault('fase', 'sobe'); s.setdefault('i', 0); s.setdefault('pwm', 0.0)
-	s['tf'] = s.get('tf', 0.0) + dt
-	s['pwm'] = min(max(s['pwm'] + k_pwm * car.u * dt, 0.0), 18.08)   # car.u = what was applied last cycle
-	niveis = _E['freio']
-	nivel = niveis[min(s['i'], len(niveis) - 1)]
-	def vai(f):
-		s['fase'], s['tf'] = f, 0.0
-		if f == 'sobe':   # the controller starts from rest again
-			for k in ('vdes_ma', 'derro', 'erro_ant'):
-				s.pop(k, None)
-			_vdes_filt.reset(0.0)
-	trim, u = 0.0, 0.0
+def _sonar(car, s):
+	# carro parado (u = -1 mantem o acelerador em 0); a cada T_SONAR s a caixa muda de distancia
+	t0 = s.setdefault('t0', car.t)
+	k = min(int((car.t - t0) // T_SONAR), len(_E['sonar']) - 1)
+	s['alvo'] = _E['sonar'][k]
 	car.vref = 0.0
-	if s['fase'] == 'sobe':
-		car.vref = min(V_FREIO, TAXA_RAMPA_V * s['tf'])
-		u = controlador_longitudinal(car, car.vref)
-		if s['tf'] > T_SOBE:
-			vai('drena')
-	elif s['fase'] == 'drena':
-		u, car.vref = -1.0, -0.01
-		if (s['pwm'] <= 0.0 and s['tf'] > 0.3) or s['tf'] > 4.0:
-			vai('pulso')
-	elif s['fase'] == 'pulso':
-		trim, car.vref = nivel, -max(nivel / 10.0, 0.02)
-		if s['tf'] > T_PULSO or (s['tf'] > 0.1 and car.v < 0.15):
-			vai('espera')
-			trim, car.vref = 0.0, 0.0
-	elif s['fase'] == 'espera':
-		s['parado'] = s.get('parado', 0.0) + dt if abs(car.v) < 0.05 else 0.0
-		if s['parado'] >= 1.0 or s['tf'] > 8.0:
-			s['i'] += 1
-			s['parado'] = 0.0
-			vai('sobe' if s['i'] < len(niveis) else 'fim')
-	_aplica_trim(car, trim)
-	car.set_u(float(np.clip(u, -1.0, 1.0)))
+	car.set_u(-1.0)
+	if __name__ == '__main__' and s.get('k') != k:   # so no carro (a analise reexecuta este arquivo)
+		s['k'] = k
+		msg = f"caixa a {s['alvo']:.1f} m do sensor" if s['alvo'] else "TIRE a caixa (nada a frente ate 4 m)"
+		print(f"SONAR: {msg} por {T_SONAR:.0f} s", flush=True)
+
+def _salva_sonar(car, linhas):
+	# sonar.csv ao lado do car.csv: t [s], d [m], valid (0 = sem eco por 0,3 s), alvo [m] ('sonar'; nan nos outros),
+	# adas (0 livre, 1 supervisor limitando a referencia, 2 emergencia)
+	np.savetxt(os.path.join(car.logfile, 'sonar.csv'), np.array(linhas, float).reshape(-1, 5), delimiter=',',
+	           header='t,d,valid,alvo,adas', comments='', fmt='%.4f')
 
 ########################################
 # controle de velocidade
 def control_func(car):
-	# open-loop test: vref is logged as 0, u is the test signal
 	if 'aberto' in _E:
 		car.vref = 0.0
-		car.set_u(_u_aberto(car, _estado))
+		car.set_u(_u_degrau(car, _estado))
 		return
-	if 'freio' in _E:
-		_freio_esc(car, _estado)
+	if 'sonar' in _E:
+		_sonar(car, _estado)
 		return
-	# the reference starts at the first control call: here car.t already counts
-	# start_mission()'s 1 s sleep (in the sim, t starts at ~0 in the loop)
-	t0 = _estado.setdefault('t0', car.t)
+	t0 = _estado.setdefault('t0', car.t)   # a referencia comeca na primeira chamada
 	vdes = _vdes(car.t - t0)
-	car.vref = vdes   # only for the log and the GUI's vref trace
-	car.set_u(controlador_longitudinal(car, vdes))
+	frear = 'parada' in _E and car.t - t0 >= _E['parada']   # 'parada': depois do corte, u = -1 direto (nao a lei)
+	if ADAS_ON and not frear:
+		vdes, frear = _adas(car, vdes)
+		if frear and RESET_AO_FREAR:
+			_zera_lei()
+	car.vref = vdes                        # so para o log e a GUI
+	u = controlador_longitudinal(car, vdes)   # roda sempre: os filtros nao ficam velhos
+	car.set_u(-1.0 if frear else u)
 
 ########################################
 # thread de visao
@@ -338,13 +349,13 @@ def vision_func(car, vision_data, stop_event):
 		cx = point[0] - W/2
 
 		vision_data["refste"] = -np.deg2rad(20.0*cx/(W/2))
-		
+
 ########################################
 # main
 ########################################
 if __name__ == "__main__":
 
-	parameters = {	
+	parameters = {
 				'ts'					: _E['ts'], # tempo da execucao (vem do ROTEIRO)
 				'save'					: True,		# salva dados da trajetoria
 				'logfile'				: 'logs/',	# log file
@@ -355,14 +366,15 @@ if __name__ == "__main__":
 
 	if 'aberto' in _E:
 		print(f"ENSAIO '{ENSAIO}' (malha aberta, u = {_E['aberto']}), ts = {_E['ts']} s", flush=True)
-	elif 'freio' in _E:
-		print(f"ENSAIO '{ENSAIO}' (EXPLORATORIO: pulsos abaixo do neutro {_E['freio']} graus, ~{_confere_pista():.0f} m), ts = {_E['ts']} s", flush=True)
+	elif 'sonar' in _E:
+		print(f"ENSAIO '{ENSAIO}' (carro PARADO; caixa a {_E['sonar']} m, {T_SONAR:.0f} s cada), ts = {_E['ts']} s", flush=True)
 	else:
-		print(f"ENSAIO '{ENSAIO}': projeto '{PROJETO}', ~{_confere_pista():.1f} m de {PISTA_M} m, ts = {_E['ts']} s", flush=True)
+		print(f"ENSAIO '{ENSAIO}': lei '{PROJETO}', ~{_confere_pista():.1f} m de {_E.get('pista', PISTA_M):.0f} m, ts = {_E['ts']} s", flush=True)
 
 	car = Car(parameters)
 
 	vision_data = {"refste": 0.0, "frame": None}
+	sonar_log = []   # (t, d, valid, alvo) de cada ciclo -> sonar.csv
 
 	stop_event = threading.Event()
 	thread_vision = None
@@ -395,14 +407,12 @@ if __name__ == "__main__":
 			# direcao
 			car.set_steer(vision_data["refste"])
 
-			# ultrassom
+			# ultrassom: com ADAS_ON o supervisor (_adas) freia; desligado, SEGUREM o carro
 			dist, valid = car.get_distance()
-
-			#if (not valid) or (dist < 0.20):
-				#print(f"Colisao: distance {dist:.2f} [m]")
-				#car.set_vel(0.0)
-			if True:
-				control_func(car)
+			_estado['sonar'] = (dist, valid)
+			control_func(car)
+			sonar_log.append((car.t, dist, int(valid), _estado.get('alvo', np.nan), _estado.get('adas_cod', 0)))
+			
 
 			# telemetria para plots remotos
 			print(
@@ -435,6 +445,7 @@ if __name__ == "__main__":
 		# salva dados
 		if parameters['save']:
 			car.save()
+			_salva_sonar(car, sonar_log)
 
 	finally:
 		# termina a thread de visao
@@ -443,7 +454,6 @@ if __name__ == "__main__":
 		if thread_vision is not None:
 			thread_vision.join(timeout=1.0)
 
-		_aplica_trim(car, 0.0)   # never leave the 'freio_esc' pulse applied
 		car.close()
 
 	print('Terminou...')

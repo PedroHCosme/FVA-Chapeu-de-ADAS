@@ -9,8 +9,8 @@ qualquer pasta:
 
     simulador/.venv/Scripts/python.exe veiculo_real/capitulo/figuras.py
 
-Le os logs de veiculo_real/dados2_sem_feedforward/roxo, grava os PDFs em
-veiculo_real/capitulo/figs/ e imprime os numeros usados nas tabelas.
+Le os logs da noite de 24/09 em ensaios/real/roxo/2026-09-24 (achados pelo id no catalogo.csv),
+grava os PDFs em veiculo_real/capitulo/figs/ e imprime os numeros usados nas tabelas.
 """
 import sys
 import importlib.util
@@ -28,7 +28,8 @@ import matplotlib.pyplot as plt
 
 AQUI = Path(__file__).resolve().parent
 REAL = AQUI.parent
-LOGS = REAL / 'dados2_sem_feedforward' / 'roxo'
+sys.path.insert(0, str(REAL / 'analise'))
+from acervo import caminho, ids        # id do carro -> arquivo em ensaios/
 FIGS = AQUI / 'figs'
 FIGS.mkdir(parents=True, exist_ok=True)
 
@@ -81,10 +82,11 @@ V_MAX = 1.5                                            # car.py: protecao |v| > 
 
 
 def carrega(nome):
-    return np.genfromtxt(LOGS / nome / 'car.csv', delimiter=',', names=True)
+    return np.genfromtxt(caminho(nome), delimiter=',', names=True)
 
 
-TODOS = sorted(p.parent.name for p in LOGS.glob('*/car.csv'))
+# os 15 ensaios da noite de 24/09 que o capitulo usa (do 000844 ao 004851; o 005720 e o 005751 vieram depois)
+TODOS = [i for i in ids(dominio='real') if '20260924_000000' <= i <= '20260924_004851']
 BOA = ['20260924_002634', '20260924_002751', '20260924_003330']
 DESC = ['20260924_003552', '20260924_003904', '20260924_004516', '20260924_004851']
 CLASSE = {
@@ -703,8 +705,7 @@ def do_main(v_ref):
 
 for vr in (1.0, 0.5):
     a = malha(NOM, do_main, v_ref=vr)
-    b = malha(NOM, novo(mod.KP_MOD, mod.K_NOM), v_ref=vr)
-    m = metricas(*a, vr)
-    print(f'main.py (KP={mod.KP_MOD}, K_NOM={mod.K_NOM}) vref={vr}: max|u_main - u_projeto| = '
-          f'{np.max(np.abs(a[2] - b[2])):.1e}; overshoot={m["over"]:.1f}%  acomoda={m["acomoda"]:.1f} s  erro={m["erro"]:+.4f}')
+    m = metricas(*a, vr)   # o main.py hoje roda o 'avanco' (P + D + FF), nao mais o projeto P + FF do capitulo
+    print(f'main.py (KP={mod.KP}, TD={mod.TD}, K_FF={mod.K_FF}) vref={vr}: '
+          f'overshoot={m["over"]:.1f}%  acomoda={m["acomoda"]:.1f} s  erro={m["erro"]:+.4f}')
 print('\nfiguras em', FIGS)
