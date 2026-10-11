@@ -52,10 +52,13 @@ DB_REF, D_REF = 2.5, 0.10   # so para comparar o K entre corridas (nao sao resul
 
 
 # ---- main.py como modulo (mesma tecnica do capitulo/figuras.py) ------------------------
-def carrega_main(ensaio='avanco'):
-    """Carrega veiculo_real/main.py com ENSAIO trocado; bibliotecas de hardware viram mocks."""
+HISTORICO = REAL / 'analise' / 'ensaios_historicos.py'
+
+
+def carrega_main(ensaio=None):
+    """Carrega veiculo_real/main.py (lei avanco_rt + ADAS); bibliotecas de hardware viram mocks. Com `ensaio`, poe por cima o
+    ensaio historico de analise/ensaios_historicos.py (referencia, preset de ganhos, malha aberta, sonar): o main.py de antes de 11/10."""
     src = (REAL / 'main.py').read_text(encoding='utf-8')
-    src = re.sub(r"^ENSAIO = '[^']*'", f"ENSAIO = '{ensaio}'", src, count=1, flags=re.M)
     sys.path.insert(0, str(REAL))
     try:
         while True:
@@ -64,6 +67,9 @@ def carrega_main(ensaio='avanco'):
             mod = importlib.util.module_from_spec(importlib.util.spec_from_loader('main_real', loader=None))
             try:
                 exec(compile(src, str(REAL / 'main.py'), 'exec'), mod.__dict__)
+                if ensaio:
+                    mod.ENSAIO = ensaio
+                    exec(compile(HISTORICO.read_text(encoding='utf-8'), str(HISTORICO), 'exec'), mod.__dict__)
                 mod.ADAS_ON = False   # a analise repassa so a lei de controle (o supervisor mexeria em V_REF/vdes dos logs antigos)
                 return mod
             except ModuleNotFoundError as e:

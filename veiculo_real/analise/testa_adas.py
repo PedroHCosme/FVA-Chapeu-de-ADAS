@@ -17,7 +17,7 @@ VIES, RUIDO = 0.02, 0.01
 def roda(pl, v_ref, parede, tira_em=None, ts=40.0, alcance=3.0, adas=True, v_parede=0.0, para_em=1e9, eco=None):
     """Carro rumo a uma parede em x = parede [m] (sai em t = tira_em; anda a v_parede [m/s] ate t = para_em: lider).
     Retorna dict com a folga final/minima, v max, o pico de v depois que o obstaculo sai, e as series."""
-    mod = A.carrega_main('avanco_rt')
+    mod = A.carrega_main()
     mod.V_REF, mod.ADAS_ON, mod.SONAR_VIES, mod.SONAR_RUIDO, mod.SONAR_ALCANCE = v_ref, adas, VIES, RUIDO, alcance
     mod.V_CRUZ = mod._v_cruzeiro(alcance)
     A.zera(mod)

@@ -113,7 +113,7 @@ def main():
         print('\nO ensaio nao deu nenhum valor: o main.py fica como esta.')
         return
     import analisa as A                                   # as constantes de projeto do supervisor vem do main.py
-    mod = A.carrega_main('avanco')
+    mod = A.carrega_main()
     print(f'\nlog {p.parent.name}: cole no main.py\n  ' + '\n  '.join(f"{n} = {v[k]:{f}} {u}" for n, k, f, u in
                                                               (('SONAR_VIES   ', 'vies', '+.3f', 'm'), ('SONAR_RUIDO  ', 'ruido', '.3f', 'm'),
                                                                ('SONAR_ALCANCE', 'alcance', '.1f', 'm')) if k in v))

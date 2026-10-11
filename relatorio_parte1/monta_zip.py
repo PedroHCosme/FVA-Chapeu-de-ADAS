@@ -24,8 +24,9 @@ Reproduzir os dados do relatorio (Python 3 com numpy e matplotlib):
 Refazer ensaios:
   Simulador: abrir simulador_rampa.ttt (repositorio da disciplina) no CoppeliaSim; cd codigo/simulador; python main.py.
              Logs em logs/AAAAMMDD_HHMMSS/car.csv. Identificacao: python identifica.py --tmax=8
-  Carro real: editar ENSAIO em codigo/veiculo_real/main.py e copiar so esse arquivo para o carro; cada corrida grava
-             car.csv e sonar.csv (colunas t,d,valid,alvo,adas: adas 0 livre, 1 FCW/limitando referencia, 2 AEB).
+  Carro real: copiar so codigo/veiculo_real/main.py para o carro; cada corrida grava car.csv e sonar.csv
+             (colunas t,d,valid,alvo,adas: adas 0 livre, 1 FCW/limitando referencia, 2 AEB; alvo so existe nos logs antigos do ensaio 'sonar').
+             Os ensaios de identificacao (ENSAIO=...) so existem nos logs e em analise/ensaios_historicos.py (usado pela analise).
 
 Observacao sobre os logs reais: as datas dos logs usam o relogio do carro (atrasado e variavel); a pasta so serve para ordenar.
 Documentacao do metodo: codigo/simulador/IDENTIFICACAO.md e CONTROLE_LONGITUDINAL.md.
