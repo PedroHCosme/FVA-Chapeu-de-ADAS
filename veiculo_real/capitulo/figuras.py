@@ -30,6 +30,7 @@ AQUI = Path(__file__).resolve().parent
 REAL = AQUI.parent
 sys.path.insert(0, str(REAL / 'analise'))
 from acervo import caminho, ids        # id do carro -> arquivo em ensaios/
+from analisa import lei_simulador     # lei do simulador/main.py repassada sobre os logs (pericia, secao 8)
 FIGS = AQUI / 'figs'
 FIGS.mkdir(parents=True, exist_ok=True)
 
@@ -140,42 +141,7 @@ G_de = lambda K: K / (np.rad2deg(1) * K_PWM)
 
 
 # ---------------------------------------------------------------------------
-# 3. Lei de controle do simulador/main.py, repassada sobre os logs (pericia)
-# ---------------------------------------------------------------------------
-def lei_simulador(t, v, vref, I=True, ff_modelo=True, ff_ref=True, filtro_u=True):
-    """Iteracao j usa v[j] e grava u na linha j+1. Na parada do ultrassom (vref volta a 0
-    depois de a rampa comecar) roda set_vel(0) no lugar: o controlador fica congelado."""
-    K, A0, C, EPS = 1.0, 0.096, 0.00425, 0.05
-    KP, KI, TT, TV, TU = 4.0, 2.67, 0.5, 0.3, 0.10
-    vf = uf = Ii = up = ubp = 0.0
-    out = np.full(len(t), np.nan)
-    comecou = False
-    for j in range(1, len(t) - 1):
-        dt, vdes = t[j] - t[j - 1], vref[j + 1]
-        comecou |= vdes > 0
-        if comecou and vdes == 0:
-            continue
-        vp = vf
-        if dt > 0:
-            vf += np.clip(dt / TV, 0, 1) * (vdes - vf)
-        ff = (vdes - vp) / TV if ff_ref else 0.0
-        e = vf - v[j]
-        if I:
-            Ii += dt * (KI * e + (up - ubp) / TT)
-        atrito = (A0 * np.tanh(v[j] / EPS) + C * v[j] * abs(v[j])) if ff_modelo else 0.0
-        ub = (KP * e + Ii + ff + atrito) / K
-        uc = float(np.clip(ub, 0.0, 1.0))
-        if filtro_u:
-            uf = uf + np.clip(dt / TU, 0, 1) * (uc - uf) if dt > 0 else uf
-        else:
-            uf = uc
-        up, ubp = uf, ub
-        out[j + 1] = 0.0 if abs(v[j]) > V_MAX else uf
-    return out
-
-
-# ---------------------------------------------------------------------------
-# 4. Simulador de malha fechada do carro real
+# 3. Simulador de malha fechada do carro real
 # ---------------------------------------------------------------------------
 DT_NOM = 0.0288
 _dts = np.concatenate([np.diff(carrega(n)['t'])[1:] for n in TODOS])

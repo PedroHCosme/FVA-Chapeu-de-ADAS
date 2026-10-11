@@ -14,16 +14,15 @@ A = T.A
 VIES, RUIDO = 0.02, 0.01
 
 
-def roda(pl, v_ref, parede, tira_em=None, ts=40.0, alcance=3.0, adas=True, seed=0, v_parede=0.0, para_em=1e9, reset=True, eco=None, a_coast=0.45, vies_real=VIES, vies_cal=VIES):
+def roda(pl, v_ref, parede, tira_em=None, ts=40.0, alcance=3.0, adas=True, v_parede=0.0, para_em=1e9, eco=None):
     """Carro rumo a uma parede em x = parede [m] (sai em t = tira_em; anda a v_parede [m/s] ate t = para_em: lider).
     Retorna dict com a folga final/minima, v max, o pico de v depois que o obstaculo sai, e as series."""
     mod = A.carrega_main('avanco_rt')
-    mod.V_REF, mod.ADAS_ON, mod.SONAR_VIES, mod.SONAR_RUIDO, mod.SONAR_ALCANCE = v_ref, adas, vies_cal, RUIDO, alcance
-    mod.RESET_AO_FREAR = reset
+    mod.V_REF, mod.ADAS_ON, mod.SONAR_VIES, mod.SONAR_RUIDO, mod.SONAR_ALCANCE = v_ref, adas, VIES, RUIDO, alcance
     mod.V_CRUZ = mod._v_cruzeiro(alcance)
     A.zera(mod)
-    planta = T.S.Planta(pl['K'], DB=pl['DB'], tau=pl['tau'], d=pl['d'], seed=seed, sig=0.016, a_coast=a_coast)
-    rng, car = np.random.default_rng(seed), A.CarroFalso()
+    planta = A.Planta(pl['K'], DB=pl['DB'], tau=pl['tau'], d=pl['d'], sig=0.016)
+    rng, car = np.random.default_rng(0), A.CarroFalso()
     t = x = u = 0.0
     t_leitura, d_lido, ult = -1.0, 4.0, -9.0
     log = []
@@ -39,7 +38,7 @@ def roda(pl, v_ref, parede, tira_em=None, ts=40.0, alcance=3.0, adas=True, seed=
         if t - t_leitura >= 0.1:                                  # ultrassom a 10 Hz; fora de 4 m nao volta eco
             t_leitura = t
             if 0.02 < d_real <= 4.0:
-                d_lido, ult = d_real + vies_real + rng.normal(0, RUIDO), t
+                d_lido, ult = d_real + VIES + rng.normal(0, RUIDO), t
         valid = t - ult < 0.3
         car.t, car.dt, car.v = t, h, v
         mod._estado['sonar'] = (min(d_lido, 4.0) if valid else 4.0, valid)
@@ -68,34 +67,25 @@ def teste():
     r = roda(T.PLANTAS['P1'], 1.0, parede=12.0, tira_em=16.0, ts=40.0)
     assert r['v'][-1] > 0.5, 'nao voltou a andar quando o obstaculo saiu'
     print(f"obstaculo saiu: voltou a {r['v'][-1]:.2f} m/s")
-    # 4b. lider que anda a 0,6 m/s (parte a 8 m): o carro (v_ref 1,3) o segue, sem encostar; distancia > D_PARADA
+    # 4. lider que anda a 0,6 m/s (parte a 8 m): o carro (v_ref 1,3) o segue, sem encostar; distancia > D_PARADA
     for nome, pl in T.PLANTAS.items():
         r = roda(pl, 1.3, parede=8.0, v_parede=0.6, ts=60.0)
         gap_fim = r['folga']
         print(f"{nome} seguindo lider a 0,6 m/s: v final {r['v'][-1]:.2f}, distancia final {gap_fim:.2f} m, minima {r['x_min']:.2f} m")
         assert r['x_min'] > 0.3 and 0.35 < r['v'][-1] < 0.8, f'{nome}: nao seguiu o lider (v {r["v"][-1]:.2f}, minima {r["x_min"]:.2f})'
-    # 4c. lider que anda e depois para (t = 25 s): o carro tambem para, sem bater
+    # 5. lider que anda e depois para (t = 25 s): o carro tambem para, sem bater
     r = roda(T.PLANTAS['P1'], 1.3, parede=8.0, v_parede=0.6, para_em=25.0, ts=60.0)
     print(f"lider que para: v final {r['v'][-1]:.2f}, distancia final {r['folga']:.2f} m, minima {r['x_min']:.2f} m")
     assert r['x_min'] > 0.3 and r['v'][-1] < 0.02, 'lider parou e o carro nao parou'
-    # 5. zerar a lei ao frear: A/B (parede fixa a 14 m e obstaculo que sai) -- so fica se nao piora nada
+    # 6. eco espurio a 1,5 m por 0,6 s em cruzeiro: o carro freia e volta a andar
     for nome, pl in T.PLANTAS.items():
-        ab = {rs: (roda(pl, 1.3, parede=14.0, reset=rs), roda(pl, 1.0, parede=12.0, tira_em=16.0, reset=rs)) for rs in (True, False)}
-        for rs, (p1, p2) in ab.items():
-            print(f"{nome} reset={rs!s:5s}: folga a 1,3 m/s {p1['x_min']:.2f} m; apos o obstaculo sair, pico v {p2['pico_pos']:.2f} m/s, v final {p2['v'][-1]:.2f}")
-        assert ab[True][0]['x_min'] >= ab[False][0]['x_min'] - 0.05, 'zerar a lei piorou a folga'
-        assert ab[True][1]['pico_pos'] <= ab[False][1]['pico_pos'] + 0.05, 'zerar a lei piorou a retomada'
-    # 5b. parada curta (eco espurio a 1,5 m por 0,6 s em cruzeiro): quanto o carro perde e quanto demora a voltar
-    for nome, pl in T.PLANTAS.items():
-        res = {}
-        for rs in (True, False):
-            r = roda(pl, 1.0, parede=1e9, ts=30.0, alcance=4.0, reset=rs, eco=(12.0, 12.6, 1.5))
-            i = np.argmax(r['t'] > 12.0)
-            volta = r['t'][i + np.argmax(r['v'][i:] < 0.5):][np.argmax(r['v'][i + np.argmax(r['v'][i:] < 0.5):] > 0.9)] - 12.6
-            res[rs] = (float(r['v'][i:].min()), float(volta), float(r['v'][-1]))
-            print(f"{nome} eco falso, reset={rs!s:5s}: v minima {res[rs][0]:.2f}, volta a 0,9 m/s {res[rs][1]:.1f} s depois, v final {res[rs][2]:.2f}")
-        assert res[True][1] <= res[False][1] + 0.5, 'zerar a lei atrasou a retomada apos eco espurio'
-    # 4. sem ADAS ele bate (o teste 1 so vale se a parede estava no caminho)
+        r = roda(pl, 1.0, parede=1e9, ts=30.0, alcance=4.0, eco=(12.0, 12.6, 1.5))
+        i = np.argmax(r['t'] > 12.0)
+        j = i + np.argmax(r['v'][i:] < 0.5)
+        volta = r['t'][j + np.argmax(r['v'][j:] > 0.9)] - 12.6
+        print(f"{nome} eco falso: v minima {r['v'][i:].min():.2f}, volta a 0,9 m/s {volta:.1f} s depois, v final {r['v'][-1]:.2f}")
+        assert r['v'][-1] > 0.9, f'{nome}: nao voltou a andar depois do eco espurio'
+    # 7. sem ADAS ele bate (o teste 1 so vale se a parede estava no caminho)
     r = roda(T.PLANTAS['P1'], 1.3, parede=10.0, ts=12.0, adas=False)
     assert r['x_min'] < 0.0, 'sem ADAS o carro deveria passar da parede'
     print('OK')

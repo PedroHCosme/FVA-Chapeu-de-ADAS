@@ -13,14 +13,12 @@ Etapa 2: o control_func do main.py numa planta nao linear: S1 (rampa), S2 (subid
 para saturacao), S3 (referencia que desce); pior caso entre P1 e P2; cortes; fronteira de Pareto. VOCE escolhe o ponto.
 Saidas: analise/saida/sintonia.txt e sintonia.png.
 """
-import argparse, contextlib, functools, io, itertools, os, sys, time
+import argparse, functools, itertools, os, sys, time
 from multiprocessing import Pool
 from pathlib import Path
 import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-with contextlib.redirect_stdout(io.StringIO()):
-    import analisa as A
-    import simula_variantes as S          # S.Planta: zona morta, teto, rolagem, atraso, ruido
+import analisa as A
 from acervo import caminho, linhas
 
 TS = 0.0288                               # periodo medio do loop do carro [s]
@@ -73,12 +71,12 @@ def simula(par, pl, cen, sig, seed=0, jitter=True):
     if 'v_ref' in cen:
         mod.V_REF = cen['v_ref']
     A.zera(mod)
-    planta = S.Planta(pl['K'], DB=pl['DB'], tau=pl['tau'], d=pl['d'], seed=seed, sig=sig)
+    planta = A.Planta(pl['K'], DB=pl['DB'], tau=pl['tau'], d=pl['d'], seed=seed, sig=sig)
     rng, car = np.random.default_rng(seed + 1000), A.CarroFalso()
     t = x = u = 0.0
     out = []
     while t < cen['ts']:
-        h = TS + (abs(rng.normal(0, 0.003)) if jitter else 0.0)   # jitter do loop (como o simula_variantes)
+        h = TS + (abs(rng.normal(0, 0.003)) if jitter else 0.0)   # jitter do loop
         t += h
         a = -cen.get('a_subida', 0.0) if X_SUBIDA <= x < X_SUBIDA + L_SUBIDA else 0.0
         v = planta.passo(t, h, u, a)                                # a planta anda com o u anterior

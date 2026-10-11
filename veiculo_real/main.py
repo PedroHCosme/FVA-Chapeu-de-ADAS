@@ -56,14 +56,12 @@ _E = ROTEIRO[ENSAIO]
 
 ########################################
 # SUPERVISOR ADAS (ultrassom): fica entre a referencia e a lei de controle (_adas, mais abaixo).
-# Bloco entre as marcas: calibrado com o ensaio 'sonar' por  python analise/calibra_adas.py <sonar.csv> --aplica
-# >>> ADAS (calibra_adas.py)
-ADAS_ON        = True   # True = supervisor ligado
+# SONAR_*: do ensaio 'sonar'; python analise/calibra_adas.py <sonar.csv> imprime os valores para colar aqui.
+ADAS_ON       = True   # True = supervisor ligado
 SONAR_VIES     = 0.00   # m -- leitura menos distancia real (mediana de 0,5 a 2 m)
 SONAR_RUIDO    = 0.005  # m -- desvio das leituras [20260930_222919]
 SONAR_ALCANCE  = 2.900  # m -- maior distancia com >= 90% de leituras validas e erro < 0,10 m [20260930_222919]
-# <<< ADAS
-A_FREIO        = 0.5    # m/s^2 -- desaceleracao so por atrito. Medido (analise/parada.py): 0,52-0,59 a 0,8 m/s, 0,67 a 1,34 m/s
+A_FREIO       = 0.5    # m/s^2 -- desaceleracao so por atrito. Medido (analise/parada.py): 0,52-0,59 a 0,8 m/s, 0,67 a 1,34 m/s
 T_REACAO       = 0.7    # s -- do corte (u = -1) ate a velocidade cair 5%. Medido: 0,40-0,55 s a 0,8 m/s, 0,43 s a 1,34 m/s (+ folga)
 D_PARADA       = 0.1   # m -- folga entre o para-choque e o obstaculo, parado
 A_PLAN         = 0.30   # m/s^2 -- a camada suave planeja frear com isto (< A_FREIO: sobra margem)
@@ -71,7 +69,6 @@ D_LIBERA       = 1.5    # m -- parado por obstaculo, so volta a andar quando a d
 TH_GAP         = 1.0    # s -- seguindo um lider em movimento: distancia desejada = D_PARADA + TH_GAP * v
 K_ACC          = 0.4    # 1/s -- vdes <= v_lider + K_ACC * (d - distancia desejada)
 JANELA_AP      = 0.6    # s -- janela da reta d(t) que da a velocidade de aproximacao (ultrassom a 10 Hz: ~6 leituras)
-RESET_AO_FREAR = True   # zera filtros e estados da lei enquanto freia (retomada sem estado velho); testa_adas.py compara
 
 ########################################
 # GANHOS. Planta (bateria > 90%): u -> servos.py integra no acelerador (9,46 graus/s por unidade de u) -> zona morta e ganho
@@ -287,7 +284,7 @@ def control_func(car):
 	frear = 'parada' in _E and car.t - t0 >= _E['parada']   # 'parada': depois do corte, u = -1 direto (nao a lei)
 	if ADAS_ON and not frear:
 		vdes, frear = _adas(car, vdes)
-		if frear and RESET_AO_FREAR:
+		if frear:
 			_zera_lei()
 	car.vref = vdes                        # so para o log e a GUI
 	u = controlador_longitudinal(car, vdes)   # roda sempre: os filtros nao ficam velhos

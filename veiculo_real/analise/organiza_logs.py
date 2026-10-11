@@ -2,13 +2,14 @@
 """Porta de entrada dos logs do carro: classifica, nomeia e guarda cada log NOVO na arvore ensaios/.
 
 A GUI baixa a pasta logs/ INTEIRA do carro a cada coleta (e o carro nunca a esvazia), entao o que chega vem
-cheio de logs que ja temos. Fluxo:
+cheio de logs que ja temos. Fluxo (esquema de nomes, colunas do catalogo.csv e regras de data: ensaios/LEIAME.txt):
   1. na GUI, aba de coleta, destino = ensaios/_entrada          (ela cria _entrada/<carro>/<id>/car.csv)
   2. ../simulador/.venv/Scripts/python.exe analise/organiza_logs.py            # a seco: mostra o que faria
   3. ../simulador/.venv/Scripts/python.exe analise/organiza_logs.py --aplica   # copia, confere o md5, atualiza o
      ensaios/catalogo.csv e esvazia a entrada (so o que ja esta guardado; o que ficou retido continua la)
 Rode de veiculo_real/. Pode passar outras pastas no lugar da entrada (ex.: um pen drive de um colega).
   --reclassifica [--aplica]   refaz controlador e parametros de TODOS os logs ja guardados (apos mudar a classificacao)
+  --data ID=AAAA-MM-DD        data real confirmada por voce (ou --data AAAA-MM-DD para todos os logs novos)
 
 O que ele faz com cada car.csv (decide pelo md5 e pelo conteudo, nunca pelo nome da pasta):
   novo               classifica, escolhe o nome e a pasta de data e guarda
@@ -17,27 +18,7 @@ O que ele faz com cada car.csv (decide pelo md5 e pelo conteudo, nunca pelo nome
   RETIDO incompleto  cortado no meio e sem versao completa: baixe de novo
   RETIDO conflito    mesmo id, conteudo diferente (nao e prefixo): decisao sua
   RETIDO data        data real que nao e terca/quinta (ou e posterior ao download): confirme com --data
-
-Nome do arquivo:  <id_carro>__<tipo>[__<parametros>][__nao-moveu].csv      em  real/roxo/<data real>/
-So entra no nome o que se SABE: a aparencia do sinal.
-  tipo u-*   : u e a entrada (malha aberta)      u-degrau (u constante por nivel), u-nulo (u = 0 o tempo todo)
-  tipo vref-*: a referencia e a entrada (malha fechada), pela forma do vref logado:
-               rampa (sobe em >= 0.3 s) | degrau (< 0.3 s) | escada (varios niveis, o 2o e maior que o 1o)
-               descida (varios niveis, o 2o e menor que o 1o) | pulsos (vref volta a 0 e sobe de novo)
-  parametros : u0.5-0.8 | v1.3 | v1.0-0.6-1.0-0.6-0.2-0.0     (niveis de u | alvo(s) de vref, lidos do sinal)
-  nao-moveu  : v_max < 0.05 m/s.
-
-catalogo.csv: o que nao esta no sinal fica FORA do nome e vai para as colunas. Parametros do controlador (kp ... niveis_freio_graus):
-so os que MUDAM o u e que o log confirma: o repasse da lei do main.py (com estes valores) reproduz o u logado em >= 97%
-das amostras (acerto_replay). Vazio = nao se aplica a esse tipo de ensaio OU nao identificado. NAO registramos o que nao deixa rastro
-no log (PISTA_M, ATRASO_PARTIDA, ts, camera, us_buzzer): copiar o valor atual do main.py seria registrar o que nao sabemos que rodou.
-  kp [rad/s]  td_s [s]  tau_vdes_s [s]  k_nom [m/s^2 por u]  v_ref_ms [m/s]  taxa_rampa_v_ms2 [m/s^2]  perfil_vref (t:alvo[@taxa];...)
-  niveis_u (u-degrau, lidos do sinal)  v_corte_ms  pwm_corte_graus  (corte do u-degrau)
-  v_freio_ms  t_sobe_s  t_pulso_s  niveis_freio_graus  (freio_esc)      parametros_extra: JSON, lei do simulador (logs de 24/09)
-
-Data real = dia em que o arquivo chegou ao PC pela 1a vez (o relogio do PC esta certo; o do carro nao, e o atraso
-muda de sessao para sessao). Aula so as tercas e quintas. Um log rodado numa aula e baixado so depois (o carro nao
-apaga nada) chega com a data errada: confirme com  --data ID=AAAA-MM-DD  (ou --data AAAA-MM-DD para todos).
+O tipo e os parametros do nome vem so da aparencia do sinal; o controlador vem do repasse da lei do main.py (acerto_replay >= 97%).
 """
 import argparse, contextlib, csv, hashlib, io, json, os, shutil, sys
 from collections import Counter
@@ -55,13 +36,10 @@ with contextlib.redirect_stdout(io.StringIO()):
     import analisa as A
 
 V_MIN_MOVEU = 0.05    # m/s: v_max abaixo disso = o carro nao saiu do lugar
-V_MAX = 1.5           # car.py: |v| > VELMAX forca u = 0
 DIAS_DE_AULA = (1, 3)  # weekday(): terca, quinta
 
 PROJ = {'avanco': (.8, .6, .5), 'base': (.6, 0., .3)}
 KN = (1.0, 1.09, 1.3, 1.6, 2.0, 2.5, 3.0, 3.5, 4.0, 4.75, 5.0)
-# lei do simulador/main.py que rodou no carro em 24/09 (copia de capitulo/figuras.py:143)
-SIM = dict(K=1.0, A0=0.096, C=0.00425, EPS=0.05, KP=4.0, KI=2.67, TT=0.5, TV=0.3, TU=0.10)
 
 PARAM_COLS = ['kp', 'td_s', 'tau_vdes_s', 'v_ref_ms', 'taxa_rampa_v_ms2', 'perfil_vref', 'niveis_u', 'v_corte_ms',
               'pwm_corte_graus', 'v_freio_ms', 't_sobe_s', 't_pulso_s', 'niveis_freio_graus', 'parametros_extra']
@@ -162,15 +140,6 @@ CANDIDATOS = {'vref-descida': ['frenagem', 'frenagem_ff', 'frenagem_rt'], 'vref-
 RAMPA = ['avanco', 'avanco_ff', 'avanco_rt', 'subida_ff', 'subida_rt', 'parada']   # vref-rampa (e o que nao estiver acima)
 
 
-def acerto(m, x):
-    """(fracao das amostras em que o u bate, amostras comparadas): o 2o numero desempata a favor de quem cobre mais do log."""
-    u, _ = A.repassa(m, x['t'], x['v'])
-    ok = ~np.isnan(u)
-    ok[:3] = False
-    ok &= x['t'] <= m._E['ts'] + 0.05
-    return (float(np.mean(np.abs(u[ok] - x['u'][ok]) < 2e-3)) if ok.any() else 0.0), int(ok.sum())
-
-
 def repasse(x, f):
     """Melhor (acerto, info): o control_func do main.py reproduz o u logado (|dif| < 2e-3)? Tenta o formato antigo
     (kp, k_nom: logs ate 02/10) e o preset como esta no main.py (unico jeito de casar o 'avanco_rt'), com e sem a guarda
@@ -188,7 +157,7 @@ def repasse(x, f):
             for pn, kn, kp_reg, kp, td, tau, kff in tentativas:
                 m.KP, m.TD, m.TAU_VDES, m.K_FF = kp, td, tau, kff
                 m.V_REF = round(f['vrmax'], 2)
-                ac, n = acerto(m, x)
+                ac, n = A.acerto(m, x)
                 if (round(ac, 3), n) > chave:
                     chave = (round(ac, 3), n)
                     proj = pn + ('_ff' if ff and kn is not None else '')
@@ -213,7 +182,7 @@ def repasse_aberto(x, f):
     for niveis in (list(programados), list(f['niveis'])):
         m._E['aberto'] = niveis
         try:
-            ac, _ = acerto(m, x)
+            ac, _ = A.acerto(m, x)
         finally:
             m._E['aberto'] = programados
         if ac > melhor[0]:
@@ -221,35 +190,9 @@ def repasse_aberto(x, f):
     return melhor
 
 
-def lei_simulador(t, v, vref, ff_ref=True):
-    """Copia de capitulo/figuras.py:143 (aquele arquivo executa tudo ao ser importado): controlador do simulador/main.py."""
-    K, A0, C, EPS = SIM['K'], SIM['A0'], SIM['C'], SIM['EPS']
-    KP, KI, TT, TV, TU = SIM['KP'], SIM['KI'], SIM['TT'], SIM['TV'], SIM['TU']
-    vf = uf = Ii = up = ubp = 0.0
-    out = np.full(len(t), np.nan)
-    comecou = False
-    for j in range(1, len(t) - 1):
-        dt, vdes = t[j] - t[j - 1], vref[j + 1]
-        comecou |= vdes > 0
-        if comecou and vdes == 0:
-            continue
-        vp = vf
-        if dt > 0:
-            vf += np.clip(dt / TV, 0, 1) * (vdes - vf)
-        ff = (vdes - vp) / TV if ff_ref else 0.0
-        e = vf - v[j]
-        Ii += dt * (KI * e + (up - ubp) / TT)
-        ub = (KP * e + Ii + ff + A0 * np.tanh(v[j] / EPS) + C * v[j] * abs(v[j])) / K
-        uc = float(np.clip(ub, 0.0, 1.0))
-        uf = uf + np.clip(dt / TU, 0, 1) * (uc - uf) if dt > 0 else uf
-        up, ubp = uf, ub
-        out[j + 1] = 0.0 if abs(v[j]) > V_MAX else uf
-    return out
-
-
 def forense_sim(x):
     for nome, kw in (('sim-orig', {}), ('sim-orig-sem-ff', dict(ff_ref=False))):
-        u = lei_simulador(x['t'], x['v'], x['vref'], **kw)
+        u = A.lei_simulador(x['t'], x['v'], x['vref'], **kw)
         ok = ~np.isnan(u)
         if ok.any() and float(np.sqrt(np.mean((u - x['u'])[ok] ** 2))) < 1e-3:
             return nome, kw
@@ -280,7 +223,7 @@ def rotula(arq, id_, dom):
     else:
         sim, kw = forense_sim(x) if id_.startswith('20260924') else (None, None)      # 24/09 rodou o controlador do simulador
         if sim:
-            extra = dict(lei='simulador/main.py', **SIM, u_min=0.0, u_max=1.0, ff_ref=kw.get('ff_ref', True))
+            extra = dict(lei='simulador/main.py', **A.SIM, u_min=0.0, u_max=1.0, ff_ref=kw.get('ff_ref', True))
             r.update(controlador=sim, origem_rotulo='repasse simulador/main.py', acerto=1.0, parametros_extra=json.dumps(extra))
         else:
             ac, info = repasse(x, f)
@@ -356,8 +299,6 @@ def main():
     data_todos = next((a for a in args.data if '=' not in a), None)
     md5_acervo = {r['md5']: r for r in acervo}
     id_acervo = {r['id_carro']: r for r in acervo}
-    if acervo and not acervo[0]['kp'] and any(r['dominio'] == 'real' and r['controlador'].endswith(('kn1.6', 'kn4.0', 'kn3.5')) and not r['kp'] for r in acervo):
-        print('AVISO: ha logs no catalogo sem parametros do controlador; rode --reclassifica --aplica\n')
 
     arqs = sorted(p for f in fontes for p in f.rglob('car.csv'))
     dados = {p: p.read_bytes() for p in arqs}

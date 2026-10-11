@@ -109,6 +109,15 @@ def guardas(mod, x):
     return [vg, None] if vg is not None and float(np.max(x['v'])) > vg else [vg]
 
 
+def acerto(mod, x):
+    """(fracao das amostras em que o u repassado bate com o logado, amostras comparadas): o 2o numero desempata a favor
+    de quem cobre mais do log (ex.: 'avanco', 13 s, bate com os 13 s iniciais de uma 'frenagem')."""
+    u, _ = repassa(mod, x['t'], x['v'])
+    ok = (x['t'] <= mod._E['ts'] + 0.05) & ~np.isnan(u)
+    ok[:3] = False
+    return (float(np.mean(np.abs(u[ok] - x['u'][ok]) < 2e-3)) if ok.any() else 0.0), int(ok.sum())
+
+
 def reconhece(x):
     """(nome do ensaio, modulo) cujo controlador reproduz o u logado; ('desconhecido', None) se nenhum."""
     melhor = ('desconhecido', None, (0.0, 0), None, None)
@@ -121,12 +130,8 @@ def reconhece(x):
             # V_REF e uma constante que voce edita no main.py entre corridas: tenta tambem o alvo que o log mostra
             for v_ref in ({v_ref0, round(float(x['vref'].max()), 2)} if 'aberto' not in mod._E else {v_ref0}):
                 mod.V_REF = v_ref
-                u, _ = repassa(mod, x['t'], x['v'])
-                ok = (x['t'] <= mod._E['ts'] + 0.05) & ~np.isnan(u)
-                ok[:3] = False
-                acerto = float(np.mean(np.abs(u[ok] - x['u'][ok]) < 2e-3)) if ok.any() else 0.0
-                # empate (ex.: 'avanco', 13 s, bate com os 13 s iniciais de uma 'frenagem'): vence quem cobre mais do log
-                chave = (round(acerto, 3), int(ok.sum()))
+                ac, n = acerto(mod, x)
+                chave = (round(ac, 3), n)   # empate: vence quem cobre mais do log
                 if chave > melhor[2]:
                     melhor = (nome, mod, chave, v_ref, vg)
         mod.V_REF, mod.V_GUARDA = v_ref0, vg0
@@ -134,6 +139,41 @@ def reconhece(x):
         x['V_REF'], x['V_GUARDA'] = melhor[3], melhor[4]   # quem usar o modulo (malha) tem que repor os dois
         return melhor[0], melhor[1]
     return 'desconhecido', None
+
+
+SIM = dict(K=1.0, A0=0.096, C=0.00425, EPS=0.05, KP=4.0, KI=2.67, TT=0.5, TV=0.3, TU=0.10)   # simulador/main.py (rodou no carro em 24/09)
+
+
+def lei_simulador(t, v, vref, I=True, ff_modelo=True, ff_ref=True, filtro_u=True):
+    """Lei do simulador/main.py (PI + inversao do modelo + FF da referencia + filtro em u) repassada sobre um log; os flags
+    desligam um termo. Iteracao j usa v[j] e grava u na linha j+1. Na parada do ultrassom (vref volta a 0 depois de a rampa
+    comecar) roda set_vel(0) no lugar: o controlador fica congelado."""
+    K, A0, C, EPS, KP, KI, TT, TV, TU = (SIM[k] for k in ('K', 'A0', 'C', 'EPS', 'KP', 'KI', 'TT', 'TV', 'TU'))
+    vf = uf = Ii = up = ubp = 0.0
+    out = np.full(len(t), np.nan)
+    comecou = False
+    for j in range(1, len(t) - 1):
+        dt, vdes = t[j] - t[j - 1], vref[j + 1]
+        comecou |= vdes > 0
+        if comecou and vdes == 0:
+            continue
+        vp = vf
+        if dt > 0:
+            vf += np.clip(dt / TV, 0, 1) * (vdes - vf)
+        ff = (vdes - vp) / TV if ff_ref else 0.0
+        e = vf - v[j]
+        if I:
+            Ii += dt * (KI * e + (up - ubp) / TT)
+        atrito = (A0 * np.tanh(v[j] / EPS) + C * v[j] * abs(v[j])) if ff_modelo else 0.0
+        ub = (KP * e + Ii + ff + atrito) / K
+        uc = float(np.clip(ub, 0.0, 1.0))
+        if filtro_u:
+            uf = uf + np.clip(dt / TU, 0, 1) * (uc - uf) if dt > 0 else uf
+        else:
+            uf = uc
+        up, ubp = uf, ub
+        out[j + 1] = 0.0 if abs(v[j]) > 1.5 else uf
+    return out
 
 
 # ---- dados e planta --------------------------------------------------------------------
@@ -359,6 +399,27 @@ def malha(mod, K, DB, tau, d, ts=12.0, Ts=0.0288):
     alvo = mod.V_REF
     fora = np.nonzero(np.abs(v - alvo) > 0.05 * alvo)[0]
     return 100 * max(0.0, v.max() / alvo - 1), float(t[fora[-1]]) if len(fora) else 0.0
+
+
+class Planta:
+    """Planta nao linear para simular a malha: u -> pwm (integra, clip) -> v_ss = G max(0, pwm - DB) -> lag tau -> atraso d
+    -> MA30 (+ ruido). Na descida a desaceleracao nao passa de a_coast (o carro so 'coasta'; 0,45 = maximo observado em 212026).
+    passo(t, h, u, dist) devolve o v que o log mostraria; dist [m/s2] e um disturbio aditivo (rampa)."""
+    def __init__(self, K, DB=3.5, tau=0.72, d=0.08, a_coast=0.45, seed=0, sig=0.004):
+        self.G, self.DB, self.tau, self.d, self.a_coast = G_DE(K), DB, tau, d, a_coast
+        self.pwm = self.vr = 0.0
+        self.t_hist, self.v_hist = [0.0], [0.0]
+        self.buf = [0.0] * N_MA
+        self.rng, self.sig = np.random.default_rng(seed), sig
+
+    def passo(self, t, h, u, dist=0.0):
+        self.pwm = min(max(self.pwm + K_PWM * u * h, 0.0), TH_MAX)
+        vss = self.G * max(0.0, self.pwm - self.DB)
+        a = max((vss - self.vr) / self.tau, -self.a_coast) + dist
+        self.vr = max(self.vr + a * h, 0.0)
+        self.t_hist.append(t); self.v_hist.append(self.vr)
+        self.buf = self.buf[1:] + [float(np.interp(t - self.d, self.t_hist, self.v_hist)) + self.rng.normal(0, self.sig)]
+        return float(np.mean(self.buf))
 
 
 # ---- logs: sempre os caminhos que voce passa (nada de busca automatica) ----------------
