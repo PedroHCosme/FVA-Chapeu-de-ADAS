@@ -25,17 +25,18 @@ V_GUARDA       = 1.35   # m/s -- guarda de VELMAX: acima disto u = -1 (None desl
 
 ########################################
 # ENSAIOS LATERAIS: caracterizam a direcao para o Stanley. None = corrida normal (direcao pela visao).
-#   'trim'    : delta = 0 em linha reta. Desvio lateral medido com trena no chao -> ajusta TRIM_DIRECAO.
+#   'trim'    : delta = 0 em linha reta, so para conferir a olho se o TRIM_DIRECAO ajustado anda reto.
 #   'circulo' : delta = DELTA_ENSAIO constante. Diametro medido com trena -> delta real = arctan(L/R);
-#               depois de N voltas o th do log deve ter girado N*360 graus.
+#               o trim sai do par +DELTA/-DELTA: desvio = (|delta_real(+)| - |delta_real(-)|)/2, TRIM_DIRECAO = -desvio.
+#               Depois de N voltas o th do log deve ter girado N*360 graus.
 #   'degrau'  : reto por T_ASSENTA s, depois patamares +DELTA, 0, -DELTA, 0 de T_PATAMAR s. Atraso = st -> w_imu.
 ENSAIO_LATERAL = None
-V_ENSAIO       = 0.5    # m/s -- velocidade constante do ensaio (no lugar de V_REF)
+V_ENSAIO       = 1.0    # m/s -- velocidade constante do ensaio (no lugar de V_REF)
 DELTA_ENSAIO   = 20.0   # graus -- esterçamento do circulo e do degrau; o lado (esquerda/direita) anote vendo o carro
 TRIM_DIRECAO   = 0.0    # graus -- somado a todo comando de direcao (servos.set_trim), tambem na corrida normal
 T_ASSENTA      = 4.0    # s -- reto ate a velocidade assentar, antes do primeiro degrau
-T_PATAMAR      = 3.0    # s -- duracao de cada patamar do degrau (a 15-20 graus e 0,5 m/s: ~60-80 graus de giro)
-TEMPO_ENSAIO   = {'trim': 20.0, 'circulo': 40.0, 'degrau': T_ASSENTA + 4 * T_PATAMAR + 1.0}   # s
+T_PATAMAR      = 1.5    # s -- duracao de cada patamar do degrau (a 20 graus e 1 m/s: ~90 graus de giro)
+TEMPO_ENSAIO   = {'trim': 10.0, 'circulo': 30.0, 'degrau': T_ASSENTA + 4 * T_PATAMAR + 1.0}   # s
 
 ########################################
 # GANHOS. Planta (bateria > 90%): u -> servos.py integra no acelerador (9,46 graus/s por unidade de u)
