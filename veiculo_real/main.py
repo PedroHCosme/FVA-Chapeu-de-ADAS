@@ -36,7 +36,7 @@ DELTA_ENSAIO   = 20.0   # graus -- esterçamento do circulo e do degrau; o lado 
 TRIM_DIRECAO   = 0.0    # graus -- somado a todo comando de direcao (servos.set_trim), tambem na corrida normal
 T_ASSENTA      = 4.0    # s -- reto ate a velocidade assentar, antes do primeiro degrau
 T_PATAMAR      = 1.5    # s -- duracao de cada patamar do degrau (a 20 graus e 1 m/s: ~90 graus de giro)
-TEMPO_ENSAIO   = {'trim': 10.0, 'circulo': 30.0, 'degrau': T_ASSENTA + 4 * T_PATAMAR + 1.0}   # s
+TEMPO_ENSAIO   = {'trim': 20.0, 'circulo': 40.0, 'degrau': T_ASSENTA + 4 * T_PATAMAR + 1.0}   # s
 
 ########################################
 # GANHOS. Planta (bateria > 90%): u -> servos.py integra no acelerador (9,46 graus/s por unidade de u)
