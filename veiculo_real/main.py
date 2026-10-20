@@ -49,7 +49,7 @@ TAU_FF   = 0.61    # [s] atraso da planta que o feedforward compensa (0 desliga)
 
 ########################################
 # SUPERVISOR ADAS (ultrassom): fica entre a referencia e a lei de controle (_adas, mais abaixo).
-ADAS_ON        = True   # False = sem supervisor (SEGUREM o carro)
+ADAS_ON        = False  # False = sem supervisor (SEGUREM o carro)
 
 # sensor: calibrado com o carro parado e uma caixa a distancias conhecidas (python analise/calibra_adas.py <sonar.csv> imprime estes valores)
 SONAR_VIES     = 0.00   # m -- leitura menos distancia real (mediana de 0,5 a 2 m)
