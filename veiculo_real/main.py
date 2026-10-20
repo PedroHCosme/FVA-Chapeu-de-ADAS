@@ -24,6 +24,20 @@ TEMPO_CORRIDA  = 35.0   # s -- duracao da corrida (~45 m a 1,3 m/s: confira a pi
 V_GUARDA       = 1.35   # m/s -- guarda de VELMAX: acima disto u = -1 (None desliga). Escolhida em analise/sintonia.py
 
 ########################################
+# ENSAIOS LATERAIS: caracterizam a direcao para o Stanley. None = corrida normal (direcao pela visao).
+#   'trim'    : delta = 0 em linha reta. Desvio lateral medido com trena no chao -> ajusta TRIM_DIRECAO.
+#   'circulo' : delta = DELTA_ENSAIO constante. Diametro medido com trena -> delta real = arctan(L/R);
+#               depois de N voltas o th do log deve ter girado N*360 graus.
+#   'degrau'  : reto por T_ASSENTA s, depois patamares +DELTA, 0, -DELTA, 0 de T_PATAMAR s. Atraso = st -> w_imu.
+ENSAIO_LATERAL = None
+V_ENSAIO       = 0.5    # m/s -- velocidade constante do ensaio (no lugar de V_REF)
+DELTA_ENSAIO   = 20.0   # graus -- esterçamento do circulo e do degrau; o lado (esquerda/direita) anote vendo o carro
+TRIM_DIRECAO   = 0.0    # graus -- somado a todo comando de direcao (servos.set_trim), tambem na corrida normal
+T_ASSENTA      = 4.0    # s -- reto ate a velocidade assentar, antes do primeiro degrau
+T_PATAMAR      = 3.0    # s -- duracao de cada patamar do degrau (a 15-20 graus e 0,5 m/s: ~60-80 graus de giro)
+TEMPO_ENSAIO   = {'trim': 20.0, 'circulo': 40.0, 'degrau': T_ASSENTA + 4 * T_PATAMAR + 1.0}   # s
+
+########################################
 # GANHOS. Planta (bateria > 90%): u -> servos.py integra no acelerador (9,46 graus/s por unidade de u)
 # -> zona morta e ganho do ESC -> atraso tau ~0,6-0,75 s -> car.v (media de 30 amostras, ~0,42 s). K = dv/dt por unidade de u ~1,95-2,9.
 # Sintonia: analise/sintonia.py, ponto #5 da fronteira de Pareto.
@@ -166,10 +180,23 @@ def _salva_sonar(car, linhas):
 	           header='t,d,valid,alvo,adas', comments='', fmt='%.4f')
 
 ########################################
+# esterçamento [rad] do ensaio lateral; o tempo conta da primeira chamada, como a rampa de velocidade
+def direcao_ensaio(car):
+	t = car.t - _estado.setdefault('t0', car.t)
+	delta = np.deg2rad(DELTA_ENSAIO)
+	if ENSAIO_LATERAL == 'circulo':
+		return delta
+	if ENSAIO_LATERAL == 'degrau' and t >= T_ASSENTA:
+		patamar = int((t - T_ASSENTA) // T_PATAMAR)
+		return (delta, 0.0, -delta, 0.0)[min(patamar, 3)]
+	return 0.0
+
+########################################
 # controle de velocidade
 def control_func(car):
 	t0 = _estado.setdefault('t0', car.t)   # a referencia comeca na primeira chamada
-	vdes = min(V_REF, TAXA_RAMPA_V * (car.t - t0))
+	v_alvo = V_ENSAIO if ENSAIO_LATERAL else V_REF
+	vdes = min(v_alvo, TAXA_RAMPA_V * (car.t - t0))
 	frear = False
 	if ADAS_ON:
 		vdes, frear = _adas(car, vdes)
@@ -213,7 +240,7 @@ def vision_func(car, vision_data, stop_event):
 if __name__ == "__main__":
 
 	parameters = {
-				'ts'					: TEMPO_CORRIDA, # tempo da execucao
+				'ts'					: TEMPO_ENSAIO[ENSAIO_LATERAL] if ENSAIO_LATERAL else TEMPO_CORRIDA, # tempo da execucao
 				'save'					: True,		# salva dados da trajetoria
 				'logfile'				: 'logs/',	# log file
 				'camera'				: False,	# habilitar camera e thread de visao
@@ -222,9 +249,12 @@ if __name__ == "__main__":
 			}
 
 	print(f"PD + FF (KP {KP}, TD {TD}, TAU_VDES {TAU_VDES}, K_FF {K_FF}, TAU_FF {TAU_FF}), V_REF {V_REF} m/s, "
-	      f"ADAS {'ligado' if ADAS_ON else 'DESLIGADO'}, ts = {TEMPO_CORRIDA:.0f} s", flush=True)
+	      f"ADAS {'ligado' if ADAS_ON else 'DESLIGADO'}, ts = {parameters['ts']:.0f} s", flush=True)
+	if ENSAIO_LATERAL:
+		print(f"ENSAIO LATERAL '{ENSAIO_LATERAL}': v {V_ENSAIO} m/s, delta {DELTA_ENSAIO} graus, trim {TRIM_DIRECAO} graus", flush=True)
 
 	car = Car(parameters)
+	car.atuador.set_trim(steer=np.deg2rad(TRIM_DIRECAO))
 
 	vision_data = {"refste": 0.0, "frame": None}
 	sonar_log = []   # (t, d, valid, alvo, adas) de cada ciclo -> sonar.csv
@@ -258,7 +288,7 @@ if __name__ == "__main__":
 				break
 
 			# direcao
-			car.set_steer(vision_data["refste"])
+			car.set_steer(direcao_ensaio(car) if ENSAIO_LATERAL else vision_data["refste"])
 
 			# ultrassom: com ADAS_ON o supervisor (_adas) freia; desligado, SEGUREM o carro
 			dist, valid = car.get_distance()

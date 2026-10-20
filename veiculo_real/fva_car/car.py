@@ -521,6 +521,7 @@ class Car:
 					'th'    : self.th,
 					'w'     : self.w,
 					'u'     : self.u,
+					'st'    : self.st,
 					'a_model'	: self.a_model,
 					'a_x'		: self.a_x,
 					'w_model'	: self.w_model,
