@@ -169,10 +169,15 @@ class _CarFalso:
 	encoder_ok = True
 	fita_ate = 1e9   # depois deste t a camera nao ve mais a fita
 	publicados = []
+	camera_nova, gravacao, gravados = True, {}, []
 
 	def __init__(self, parameters):
 		self.parameters, self.logfile = parameters, tempfile.mkdtemp(prefix='testa_stanley_')
+		self.tinit = 100.0   # origem monotonic do car.t, como no Car real
 		self.cam = types.SimpleNamespace(start_stream=lambda fps=10: None, publish_frame=_CarFalso.publicados.append)
+		if _CarFalso.camera_nova:   # camera.py antigo no carro nao tem gravacao: o main.py tem que seguir sem ela
+			self.cam.start_recording = lambda pasta, t0, fps: _CarFalso.gravacao.update(pasta=pasta, t0=t0, fps=fps)
+			self.cam.record_frame = lambda img, capture_time: _CarFalso.gravados.append(capture_time)
 		self.t, self.dt, self.v, self.a, self.u, self.st, self.vref, self.w, self.th = 0.0, 0.02, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 		self.p, self.traj = (0.0, 0.0), []
 		self.v_filt = types.SimpleNamespace(n=20)
@@ -253,6 +258,14 @@ def teste_modos():
 		assert _CarFalso.publicados, 'a visao nao publicou quadros no video'
 		vis = _CarFalso.publicados[-1]
 		assert vis.shape == T_IMG and ((vis == (0, 255, 0)).all(-1)).sum() > 100 and ((vis == (255, 0, 255)).all(-1)).sum() > 50, 'video sem os pixels usados ou sem a fita ajustada'
+		g = _CarFalso.gravacao
+		assert g['pasta'] == pasta and g['t0'] == 100.0 and g['fps'] == ns['GRAVA_VIDEO_HZ'], f'gravacao mal iniciada: {g}'
+		assert _CarFalso.gravados and 0.0 <= min(_CarFalso.gravados) - 100.0 < 0.2 and max(_CarFalso.gravados) - 100.0 <= 1.1, \
+			'timestamps dos quadros do mp4 nao estao em tinit + car.t'
+		_CarFalso.camera_nova = False   # camera.py antigo: sem start_recording, a corrida tem que andar igual
+		ns2, pasta2 = roda_main()
+		_CarFalso.camera_nova = True
+		assert 'lateral.csv' in os.listdir(pasta2), 'sem gravacao de video a corrida nao gravou os logs'
 		_CarFalso.encoder_ok, _CarFalso.fita_ate = False, 0.5   # encoder zerado e fita some: so o tempo pode parar o carro
 		roda_main(TEMPO_CORRIDA='2.0', T_SEM_FITA='0.5', BUSCA_ARCO='False', BUSCA_RE='False')
 		_CarFalso.encoder_ok, _CarFalso.fita_ate = True, 1e9

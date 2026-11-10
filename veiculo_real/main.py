@@ -33,6 +33,8 @@ VIDEO_HZ       = 10.0   # Hz -- quadros do video; a compressao so roda com a GUI
 TELEMETRIA_HZ  = 10.0   # Hz -- linhas DATA para a GUI
 GRAVA_QUADROS  = True   # guarda quadros crus da camera para testar a visao offline (analise/compara_filtros.py)
 GRAVA_HZ       = 2.0    # Hz -- quadros guardados por segundo; vao para logs/<corrida>/quadros/ depois que o carro para
+GRAVA_VIDEO    = True   # grava camera.mp4 + video_timestamps.csv (t = car.t) na pasta da corrida, em thread propria do camera.py
+GRAVA_VIDEO_HZ = 10.0   # Hz -- quadros do mp4; e tambem a velocidade de reproducao, entao use a taxa real da camera ou menos
 
 ########################################
 # LIMITES DE SEGURANCA
@@ -740,6 +742,16 @@ def quadro_visao(img, car):
 	cv2.putText(vis, texto, (8, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
 	return vis
 
+def inicia_gravacao(car):
+	# mp4 com timestamps alinhados ao car.t (o mesmo t do lateral.csv). Sem gravacao o carro anda igual
+	if not GRAVA_VIDEO:
+		return
+	try:
+		car.cam.start_recording(car.logfile, t0=car.tinit, fps=GRAVA_VIDEO_HZ)
+		_estado['gravando'] = True
+	except (AttributeError, OSError, RuntimeError) as erro:
+		print(f"GRAVACAO de video desligada: {erro!r}", flush=True)
+
 def inicia_video(car):
 	# sem video o carro anda igual: camera.py antigo no carro ou porta ocupada nao param a corrida
 	if not VIDEO_VISAO:
@@ -769,6 +781,8 @@ def vision_func(car, stop_event):
 			continue
 		processa_quadro(img, t_quadro)
 		_guarda_quadro(img, t_quadro)
+		if _estado.get('gravando'):
+			car.cam.record_frame(img, capture_time=car.tinit + t_quadro)   # imagem crua, antes do overlay; nao bloqueia
 		if video and car.t - _estado.get('t_video', -1.0) >= 1.0 / VIDEO_HZ:
 			_estado['t_video'] = car.t
 			try:
@@ -835,7 +849,7 @@ def _imprime_configuracao():
 	print(f"V_REF {V_REF} m/s, {TEMPO_CORRIDA:.0f} s, PD + FF (KP {KP}, TD {TD}, TAU_VDES {TAU_VDES}, K_FF {K_FF}, TAU_FF {TAU_FF}), "
 	      f"Stanley (K {K_STANLEY}, K_SOFT {K_SOFT}, sinal {SINAL_DIRECAO:+.0f}, trim {TRIM_DIRECAO} graus), "
 	      f"acelerador max {ACELERADOR_MAX} graus, ADAS {'ligado' if ADAS_ON else 'DESLIGADO'}, "
-	      f"filtro {'relativo' if FILTRO_RELATIVO else 'saturacao'}, grava quadros {'sim' if GRAVA_QUADROS else 'nao'}, "
+	      f"filtro {'relativo' if FILTRO_RELATIVO else 'saturacao'}, grava quadros {'sim' if GRAVA_QUADROS else 'nao'}, mp4 {'sim' if GRAVA_VIDEO else 'nao'}, "
 	      f"busca arco {'sim' if BUSCA_ARCO else 'nao'}, re {'sim' if BUSCA_RE else 'nao'}", flush=True)
 
 def _cria_carro():
@@ -877,6 +891,7 @@ def corrida(car):
 	try:
 		car.start_mission()
 		_estado['linha'] = (car.t, 0.0, 0.0, 0.0)   # ainda sem fita
+		inicia_gravacao(car)
 		inicia_video(car)
 		thread_visao = threading.Thread(target=vision_func, args=(car, stop_event), daemon=True)
 		thread_visao.start()
