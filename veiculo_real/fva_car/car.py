@@ -88,10 +88,10 @@ class Car:
 		
 		# monitorar calibracao
 		self.a_model = 0.0
-		self.a_x = 0.0
+		self.a_x = np.nan
 		self.w_model = 0.0
-		self.w_imu = 0.0
-		self.yaw_mag = 0.0
+		self.w_imu = np.nan
+		self.yaw_mag = np.nan
 		
 		# comando de aceleracao
 		self.u = 0.0
@@ -145,12 +145,14 @@ class Car:
 			print(f"\033[31mErro no velocimetro: {e}\033[0m", flush=True)
 			raise
 		
-		# imu
+		# IMU opcional: o carrinho opera com odometria/modelo se estiver ausente.
+		self.imu = None
 		try:
 			self.imu = imu.IMU()
+			print("\033[32mIMU disponivel.\033[0m", flush=True)
 		except Exception as e:
-			print(f"\033[31mErro na IMU: {e}\033[0m", flush=True)
-			raise
+			self.imu = None
+			print(f"\033[33mIMU nao disponivel: {e}. Usando modelo cinematico.\033[0m", flush=True)
 		
 		# ultrasom
 		try:
@@ -203,6 +205,21 @@ class Car:
 			print("\033[33m##############################\033[0m", flush=True)
 
 	########################################
+	# Desabilita a IMU se ela falhar durante a execucao.
+	def disable_imu(self, error):
+		print(f"\033[33mIMU desconectada: {error}. Continuando com odometria.\033[0m", flush=True)
+		old_imu = self.imu
+		self.imu = None
+		self.w_imu = np.nan
+		self.a_x = np.nan
+		self.yaw_mag = np.nan
+		if old_imu is not None:
+			try:
+				old_imu.close()
+			except Exception:
+				pass
+
+	########################################
 	# comeca a missao
 	def start_mission(self):
 		
@@ -215,10 +232,14 @@ class Car:
 				print("\033[32mOrigem GPS definida.\033[0m", flush=True)
 				
 				# heading inicial pela bussola
-				_, _, yaw_mag = self.imu.get_euler(degrees=False)
-				if yaw_mag is not None:
-					self.th = yaw_mag
-					print("\033[32mHeading inicial definido pela bussola.\033[0m", flush=True)
+				if self.imu is not None:
+					try:
+						_, _, yaw_mag = self.imu.get_euler(degrees=False)
+						if yaw_mag is not None and np.isfinite(yaw_mag):
+							self.th = yaw_mag
+							print("\033[32mHeading inicial definido pela bussola.\033[0m", flush=True)
+					except Exception as e:
+						self.disable_imu(e)
 			else:
 				print("\033[33mNao foi possivel definir origem GPS.\033[0m", flush=True)
 				
@@ -340,14 +361,14 @@ class Car:
 		yaw = self.th + self.w*self.dt
 
 		# corrige com bussola somente se houver GPS
-		if self.gps is not None:
-			_, _, self.yaw_mag = self.imu.get_euler(degrees=False)
-
-			if self.yaw_mag is not None:
-				K = 0*0.05
-				# erro angular corretamente embrulhado
-				error = np.arctan2(np.sin(self.yaw_mag - yaw), np.cos(self.yaw_mag - yaw))
-				yaw += K*error
+		if self.gps is not None and self.imu is not None:
+			try:
+				_, _, yaw_mag = self.imu.get_euler(degrees=False)
+				if yaw_mag is not None and np.isfinite(yaw_mag):
+					self.yaw_mag = yaw_mag
+					# Correcao magnetica desativada no codigo original (K=0).
+			except Exception as e:
+				self.disable_imu(e)
 
 		# mantem entre 0 e 2*pi
 		yaw = yaw % (2.0*np.pi)
@@ -369,14 +390,22 @@ class Car:
 
 		# velocidade angular pelo modelo cinematico
 		self.w_model = (vf / CAR['L']) * np.tan(self.st)
-
-		# velocidade angular medida pela IMU
-		_, _, g_z = self.imu.get_gyro()
-		self.w_imu = np.deg2rad(g_z)
-
-		# fusao modelo + IMU
-		K = 0*0.8
-		w = (1.0 - K)*self.w_model + K*self.w_imu
+		w = self.w_model
+		
+		# IMU somente para monitoramento; fusao desativada no codigo original.
+		if self.imu is not None:
+			try:
+				_, _, g_z = self.imu.get_gyro()
+				self.w_imu = np.deg2rad(g_z) if g_z is not None else np.nan
+				
+				# fusao modelo + IMU
+				#K = 0*0.8
+				#w = (1.0 - K)*self.w_model + K*self.w_imu
+				
+			except Exception as e:
+				self.disable_imu(e)
+		else:
+			self.w_imu = np.nan
 
 		# filtra velocidade angular
 		wf = self.w_filt.filter(w)
@@ -393,12 +422,22 @@ class Car:
 		else:
 			self.a_model = 0.0
 
-		# aceleracao medida pela IMU
-		self.a_x, _, _ = self.imu.get_accel()
-
-		# fusao sensorial
-		K = 0*0.2
-		a = (1.0 - K)*self.a_model + K*self.a_x
+		a = self.a_model
+				
+		# IMU somente para monitoramento; fusao desativada no codigo original.
+		if self.imu is not None:
+			try:
+				a_x, _, _ = self.imu.get_accel()
+				self.a_x = a_x if a_x is not None else np.nan
+				
+				# fusao sensorial
+				#K = 0*0.2
+				#a = (1.0 - K)*self.a_model + K*self.a_x
+				
+			except Exception as e:
+				self.disable_imu(e)
+		else:
+			self.a_x = np.nan
 
 		# filtra
 		af = self.a_filt.filter(a)
@@ -520,21 +559,19 @@ class Car:
 		
 	########################################
 	# get ultrasonic distance
-	def get_distance(self, max_dist=4.0, d_min=0.3):
+	def get_distance(self, d_min=0.3):
 		
 		# captura a distancia
 		d, valid = self.us.get_distance()
-		d = np.min([d, max_dist])
+		d = np.clip(d, ultrasonic.MIN_RANGE, ultrasonic.MAX_RANGE)
 
-		# toca o buzzer se muito proximo ou invalido
+		# toca o buzzer se muito proximo
 		if self.parameters['us_buzzer']:
-			if not valid:
-				self.bz.beep(0.1)
-			elif d <= d_min:
+			if d <= d_min:
 				self.bz.beep(d/3.0)
 				
 		# retorna distancia
-		return d , valid
+		return d, valid
 	
 	########################################
 	# salva a trajetoria
@@ -551,7 +588,6 @@ class Car:
 					'th'    	: self.th,
 					'w'     	: self.w,
 					'u'     	: self.u,
-					'st'    	: self.st,
 					'a_model'	: self.a_model,
 					'a_x'		: self.a_x,
 					'w_model'	: self.w_model,
@@ -632,7 +668,8 @@ class Car:
 		self.odometer.close()
 		self.atuador.close()
 		self.us.close()
-		self.imu.close()
+		if self.imu is not None:
+			self.imu.close()
 		if self.parameters['camera']:
 			self.cam.close()
 		if self.gps is not None:
@@ -680,20 +717,16 @@ if __name__ == "__main__":
 			car.step()
 			
 			# le ultrasom
-			dist, valid = car.get_distance()
+			dist, _ = car.get_distance()
 			# seta torque do motor
-			if valid and dist > 0.10:
-				if t < parameters['ts']/2:
+			if dist > 0.30:
+				if t < parameters['ts']/2.0:
 					car.set_vel(0.7)
-					print("Controle Armando ativado")
 				else:
 					car.set_vel(-0.7)
-					print("Controle Armando ativado")
 			else:
 				car.set_vel(0.0)
-				print("Controle Armando com set_vel 0.0")
-
-			#
+				
 			# mostra estado a 5 Hz
 			if t - t_print >= 0.2:
 				modo_dir = "\033[31mAUTO\033[0m" if car.sel_direcao else "\033[33mRC\033[0m"

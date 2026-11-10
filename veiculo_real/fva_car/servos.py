@@ -196,7 +196,6 @@ class Servos:
 		
 		# aplica calibracao devido a reducoes do eixo
 		pwm += self.trim_throttle + ZERO_THROTTLE_ANGLE
-
 		
 		# envia comando
 		if self.gear == Gear.FORWARD:
