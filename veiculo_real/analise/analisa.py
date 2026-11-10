@@ -71,6 +71,7 @@ def carrega_main(ensaio=None):
                     mod.ENSAIO = ensaio
                     exec(compile(HISTORICO.read_text(encoding='utf-8'), str(HISTORICO), 'exec'), mod.__dict__)
                 mod.ADAS_ON = False   # a analise repassa so a lei de controle (o supervisor mexeria em V_REF/vdes dos logs antigos)
+                mod.ENSAIO_LATERAL = None   # sempre a corrida normal, qualquer que seja o ensaio deixado no main.py
                 return mod
             except ModuleNotFoundError as e:
                 if e.name.split('.')[0] == 'fva_car':

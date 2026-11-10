@@ -685,10 +685,14 @@ if __name__ == "__main__":
 			if valid and dist > 0.10:
 				if t < parameters['ts']/2:
 					car.set_vel(0.7)
+					print("Controle Armando ativado")
 				else:
 					car.set_vel(-0.7)
+					print("Controle Armando ativado")
 			else:
 				car.set_vel(0.0)
+				print("Controle Armando com set_vel 0.0")
+
 			#
 			# mostra estado a 5 Hz
 			if t - t_print >= 0.2:
