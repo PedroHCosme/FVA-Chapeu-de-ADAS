@@ -19,11 +19,16 @@ import numpy as np
 import threading
 import time
 import os
+try:
+	from scipy import ndimage as ndi   # so o GUIA = 'cones' usa (rotulos e morfologia da mascara)
+except ImportError:
+	ndi = None
 
 ########################################
 # CONDICOES DO ENSAIO
 ########################################
-V_REF          = 1.0    # m/s -- velocidade de cruzeiro na reta
+GUIA           = 'cones' # 'cones' = corredor de cones (verde a esquerda, vermelho a direita) | 'fita' = fita amarela no chao
+V_REF          = 1   # m/s -- velocidade de cruzeiro na reta
 V_CURVA        = 1.0    # m/s -- alvo com a direcao no batente (entre 0 e 20 graus cai linear de V_REF ate aqui)
 TAXA_RAMPA_V   = 0.9    # m/s^2 -- inclinacao maxima da referencia, subindo e descendo
 TEMPO_CORRIDA  = 40.0   # s -- duracao da corrida
@@ -49,8 +54,8 @@ E_MAX_FITA     = 0.6    # m -- medida com |e| maior que isto nao e a fita: desca
 # BUSCA DA FITA: fita perdida -> 1) arco para a frente, para o lado onde ela sumiu -> 2) re pelo caminho ja percorrido -> 3) desiste e para
 # As duas chaves False: so freia e espera a fita aparecer, como antes.
 ########################################
-BUSCA_ARCO     = False  # etapa 1
-BUSCA_RE       = False  # etapa 2 (sem sensor atras: SEGUREM o carro nos primeiros testes)
+BUSCA_ARCO     = True  # etapa 1
+BUSCA_RE       = True  # etapa 2 (sem sensor atras: SEGUREM o carro nos primeiros testes)
 V_BUSCA        = 0.3    # m/s -- velocidade do arco
 D_ARCO         = 1.0    # m -- maior distancia do arco
 T_ARCO         = 5.0    # s -- maior tempo do arco (vale mesmo com o encoder lendo zero)
@@ -108,6 +113,34 @@ TRECHO_CURVA   = 0.5    # m -- fita vista num trecho maior que isto: ajusta arco
 C_MAX          = 0.6    # 1/m -- teto da meia curvatura medida (raio de 0,8 m)
 MIN_PIXELS     = 40     # pixels amarelos minimos para medir (pedaco de fita picotada ja basta)
 MAX_PIXELS     = 3000   # acima disto usa uma amostra regular dos pixels
+
+########################################
+# VISAO: cones (analise/cones.py tem os experimentos). Cor em Lab: a > 0 avermelhado, a < 0 esverdeado, ~0 no piso e nas paredes
+########################################
+CONE_LINHAS    = (LINHA_HORIZONTE, 380)   # linhas da imagem que a visao de cones usa (do horizonte para baixo)
+CONE_A_VERM    = 20.0   # a minimo do vermelho (cone 27; coluna marrom 15)
+CONE_ANG_VERM  = (8.0, 48.0)   # graus -- angulo de matiz atan2(b, a) do vermelho (cone 28; madeira laranja 43 mas escura)
+CONE_A_VERDE   = 9.0    # -a minimo do verde (cone -16 a -19)
+CONE_L_MIN     = 18.0   # claridade minima (porta de madeira escura tem 12)
+CONE_AREA_MIN  = 14     # pixels da caixa
+CONE_ALTURA_MIN = 10    # pixels -- caixa mais baixa que isto esta longe demais (1 px = varios cm)
+CONE_RAZAO     = (0.9, 3.0)   # altura / largura da caixa (o cone e mais alto que largo)
+CONE_PREENCH_MIN = 0.38 # area da mascara / area da caixa (triangulo ~0,5)
+CONE_VALE_MAX  = 0.6    # perfil de largura abaixo disto do menor pico entre 2 picos: sao 2 cones colados
+CONE_VALE_PX   = 4      # pixels -- vale do contorno de cima entre 2 apices, abaixo dos dois: tambem sao 2 cones
+X_MAX_CONES    = 5.0    # m -- cone mais longe que isto nao entra
+JANELA_CONES   = 0.25   # m -- cone a mais que isto das fileiras ajustadas e descartado (falso positivo, cor trocada)
+CONE_MIN_PONTOS = 3     # cones minimos para medir
+CONE_MIN_TRECHO = 0.8   # m -- os cones tem que cobrir este trecho em x: 3 ou 4 cones juntos dao inclinacao absurda (visto nos quadros reais)
+PSI_MAX_CONES  = np.deg2rad(40.0)   # rad -- medida com |psi_e| maior que isto nao e o corredor
+CONE_MIN_CURVA = 5      # cones e trecho minimos para ajustar a curvatura; menos: mantem a prevista
+TRECHO_CONES   = 1.0    # m
+PESO_K         = 0.05   # a priori da curvatura (k perto da prevista): ~ (1 / 0,15 de desvio) / (1 / 0,007 m de erro de 1 px por m^2)
+LARGURA_CORREDOR = 1.2  # m -- so usado com UMA fileira visivel, ate medir a largura das duas
+LARGURA_FILTRO = 0.2    # 0 a 1 -- quanto cada medida nova pesa na largura
+if GUIA == 'cones' and ndi is None:
+	print("GUIA 'cones' precisa do scipy (scipy.ndimage): usando a fita", flush=True)
+	GUIA = 'fita'
 
 ########################################
 # VELOCIDADE: PD + feedforward (analise/sintonia.py, ponto #5 da fronteira de Pareto)
@@ -510,11 +543,200 @@ def _medida_confiavel():
 	x, _ = no_chao(uu[perto], vv[perto])
 	return np.ptp(x) >= TRECHO_BUSCA
 
+########################################
+# VISAO: corredor de cones. Cada cone vira um ponto no chao pelo pe da caixa (no_chao); as duas fileiras sao arcos paralelos
+#   y = s_lado + p*x + k*(x^2 + y^2)     (mesmos p e k, s diferente: linear em s_esq, s_dir, p, k)
+# e o corredor e o arco do meio: sai o mesmo (e, psi_e, c) da fita, e o resto da lei (previsao, Stanley, freio) nao muda.
+########################################
+_C = np.arange(256) / 255.0
+_LINEAR = np.where(_C <= 0.04045, _C / 12.92, ((_C + 0.055) / 1.055) ** 2.4).astype(np.float32)   # sRGB -> linear, por tabela
+
+def _f_lab(t):
+	return np.where(t > 216 / 24389, np.cbrt(t), (24389 / 27 * t + 16) / 116)
+
+def _lab(faixa_bgr):
+	# (L, a, b) de cada pixel
+	r, g, b = (_LINEAR[faixa_bgr[..., canal]] for canal in (2, 1, 0))
+	x = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.95047
+	y = 0.2126 * r + 0.7152 * g + 0.0722 * b
+	z = (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.08883
+	fx, fy, fz = _f_lab(x), _f_lab(y), _f_lab(z)
+	return 116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)
+
+def mascaras_cones(faixa_bgr):
+	# (vermelho, verde) booleanas. O matiz do vermelho (b entre a*tan(8) e a*tan(48)) evita o trigonometrico por pixel
+	L, a, b = _lab(faixa_bgr)
+	tan_min, tan_max = np.tan(np.deg2rad(CONE_ANG_VERM[0])), np.tan(np.deg2rad(CONE_ANG_VERM[1]))
+	vermelho = (a >= CONE_A_VERM) & (b >= a * tan_min) & (b <= a * tan_max) & (L >= CONE_L_MIN)
+	verde = (a <= -CONE_A_VERDE) & (L >= CONE_L_MIN)
+	return vermelho, verde
+
+def _limpa_mascara(mascara):
+	# abre (tira ruido de 1 a 2 pixels) e fecha (junta a faixa clara do cone, o reflexo, ao corpo)
+	return ndi.binary_closing(ndi.binary_opening(mascara, np.ones((2, 2))), np.ones((3, 3)))
+
+def _cortes_por_apice(mancha):
+	# cones em fila que se afasta se sobrepoem na imagem (a contagem de pixels por coluna nao tem vale), mas cada um tem um apice:
+	# cortamos no ponto mais baixo do contorno de cima entre dois apices, se o vale tem CONE_VALE_PX ou mais abaixo dos dois
+	topo = np.where(mancha.any(0), mancha.argmax(0), mancha.shape[0]).astype(float)
+	apices = [x for x in range(len(topo)) if topo[x] <= topo[max(x - 2, 0):x + 3].min() and (x == 0 or topo[x] < topo[x - 1] or topo[x] < topo[min(x + 1, len(topo) - 1)])]
+	cortes = []
+	for p, q in zip(apices[:-1], apices[1:]):
+		if q - p < 3:
+			continue
+		vale = p + int(np.argmax(topo[p:q + 1]))
+		if topo[vale] - max(topo[p], topo[q]) >= CONE_VALE_PX and vale - (cortes[-1] if cortes else 0) >= 3:
+			cortes.append(vale)
+	return cortes
+
+def _cortes_entre_cones(mancha):
+	# colunas onde cortar uma mancha que junta cones vizinhos: pelo perfil de largura e pelos apices
+	return sorted(set(_cortes_pelo_perfil(mancha.sum(0))) | set(_cortes_por_apice(mancha)))
+
+def _cortes_pelo_perfil(coluna):
+	# coluna[x] = pixels da mascara na coluna x: um cone e um triangulo (um pico) e entre dois cones colados o perfil cai a ~50% do menor pico
+	c = np.convolve(coluna.astype(float), np.ones(3) / 3.0, mode='same')
+	picos = [x for x in range(1, len(c) - 1) if c[x] >= c[x - 1] and c[x] > c[x + 1] and c[x] >= 0.4 * c.max()]
+	fundidos = []
+	for p in picos:
+		if fundidos and p - fundidos[-1] < 3:
+			fundidos[-1] = p if c[p] > c[fundidos[-1]] else fundidos[-1]
+		else:
+			fundidos.append(p)
+	cortes = []
+	for p, q in zip(fundidos[:-1], fundidos[1:]):
+		vale = p + int(np.argmin(c[p:q + 1]))
+		if c[vale] <= CONE_VALE_MAX * min(c[p], c[q]) and vale - (cortes[-1] if cortes else 0) >= 3:
+			cortes.append(vale)
+	return cortes
+
+def _cone_da_mancha(mancha, cor, u0, v0):
+	# caixa justa da mancha, ou None se nao tem forma de cone. u0, v0 = canto da mancha na imagem
+	linhas, colunas = np.nonzero(mancha.any(1))[0], np.nonzero(mancha.any(0))[0]
+	if len(linhas) == 0:
+		return None
+	mancha = mancha[linhas[0]:linhas[-1] + 1, colunas[0]:colunas[-1] + 1]
+	largura = mancha.shape[1]
+	area = int(mancha.sum())
+	# posicao pelo APICE: o centro do cone e a coluna do apice e o pe e onde a mascara termina nela. Num pedaco cortado de uma fila de
+	# cones a caixa inclui a base do vizinho (mais perto), e o pe e o centro da caixa saem errados
+	coluna = int(np.median(np.nonzero(mancha[0])[0]))
+	altura = mancha.shape[0] if mancha[:, coluna].all() else int(np.argmin(mancha[:, coluna]))
+	if area < CONE_AREA_MIN or altura < CONE_ALTURA_MIN:
+		return None
+	if not CONE_RAZAO[0] <= altura / largura <= CONE_RAZAO[1] or area / (altura * largura) < CONE_PREENCH_MIN:
+		return None
+	u, v = u0 + colunas[0], v0 + linhas[0]
+	return dict(cor=cor, u=u + coluna + 0.5, v_pe=v + altura, u0=u, v0=v, largura=largura, altura=altura)
+
+def _cones_da_mascara(mascara, cor, linha0):
+	rotulos, _ = ndi.label(_limpa_mascara(mascara))
+	cones = []
+	for i, (ys, xs) in enumerate(ndi.find_objects(rotulos), start=1):
+		mancha = rotulos[ys, xs] == i
+		limites = [0] + _cortes_entre_cones(mancha) + [mancha.shape[1]]
+		for a, b in zip(limites[:-1], limites[1:]):
+			cone = _cone_da_mancha(mancha[:, a:b], cor, xs.start + a, ys.start + linha0)
+			if cone is not None:
+				cones.append(cone)
+	return cones
+
+def detecta_cones(img):
+	# lista de cones (dicts com cor, u, v_pe, caixa) na imagem BGR
+	linha0, linha1 = CONE_LINHAS
+	vermelho, verde = mascaras_cones(img[linha0:linha1])
+	return _cones_da_mascara(vermelho, 'vermelho', linha0) + _cones_da_mascara(verde, 'verde', linha0)
+
+def _cones_no_chao(cones):
+	# (x, y, verde) de cada cone ao alcance, no frame do eixo dianteiro. O lado de cada cor NAO e fixo: o ajuste descobre (ver _ajusta_fileiras)
+	if not cones:
+		return np.zeros(0), np.zeros(0), np.zeros(0, bool)
+	x, y = no_chao([c['u'] for c in cones], [c['v_pe'] for c in cones])
+	verde = np.array([c['cor'] == 'verde' for c in cones])
+	ao_alcance = np.isfinite(x) & (x > 0.2) & (x < X_MAX_CONES)
+	return x[ao_alcance], y[ao_alcance], verde[ao_alcance]
+
+def _ajusta_fileiras(x, y, verde, k_fixo):
+	# minimos quadrados com peso 1/x^2 (1 pixel de erro no pe vale x^2 metros). (s_verde, s_vermelho, p, k): uma fileira por COR, com p e k
+	# em comum; s de uma cor sem cone = None. k fica em k_fixo se os cones nao determinam a curvatura (poucos, ou num trecho curto)
+	ha_esq, ha_dir = verde.any(), (~verde).any()
+	k_livre = len(x) >= CONE_MIN_CURVA and np.ptp(x) >= TRECHO_CONES
+	r2 = x * x + y * y
+	colunas = ([verde.astype(float)] if ha_esq else []) + ([(~verde).astype(float)] if ha_dir else []) + [x] + ([r2] if k_livre else [])
+	A, alvo = np.column_stack(colunas), y if k_livre else y - k_fixo * r2
+	peso = 1.0 / np.maximum(x, 0.5) ** 2
+	A, alvo = A * peso[:, None], alvo * peso
+	if k_livre:   # a priori fraca: a curvatura fica perto da prevista, a menos que os cones peçam outra (o ruido dela cresce com x^2 no eixo)
+		linha_k = np.zeros(A.shape[1])
+		linha_k[-1] = PESO_K
+		A, alvo = np.vstack([A, linha_k]), np.append(alvo, PESO_K * k_fixo)
+	solucao, _, posto, _ = np.linalg.lstsq(A, alvo, rcond=None)
+	if posto < A.shape[1]:
+		return None
+	s_verde, s_vermelho = (solucao[0] if ha_esq else None), (solucao[int(ha_esq)] if ha_dir else None)
+	return s_verde, s_vermelho, solucao[int(ha_esq) + int(ha_dir)], (solucao[-1] if k_livre else k_fixo)
+
+def _fora_das_fileiras(x, y, verde, ajuste):
+	# distancia [m] de cada cone a sua fileira
+	s_verde, s_vermelho, p, k = ajuste
+	s = np.where(verde, s_verde if s_verde is not None else 0.0, s_vermelho if s_vermelho is not None else 0.0)
+	return _distancia((s, p, k), x, y)
+
+def ajusta_corredor(x, y, verde, k_fixo):
+	# duas passadas: a segunda sem os cones longe das fileiras (cone de outro corredor, mancha verde no chao). None se nao ha cones
+	usa = np.ones(len(x), bool)
+	for _ in range(2):
+		if np.count_nonzero(usa) < CONE_MIN_PONTOS or np.ptp(x[usa]) < CONE_MIN_TRECHO:
+			return None
+		ajuste = _ajusta_fileiras(x[usa], y[usa], verde[usa], k_fixo)
+		if ajuste is None:
+			return None
+		usa = _fora_das_fileiras(x, y, verde, ajuste) < JANELA_CONES
+	return ajuste if np.count_nonzero(usa) >= CONE_MIN_PONTOS and np.ptp(x[usa]) >= CONE_MIN_TRECHO else None
+
+def _arco_do_meio(ajuste):
+	# ((s, p, k) do centro, largura medida ou None). O lado de cada cor sai do ajuste (s_verde > s_vermelho: verde a esquerda) e fica
+	# guardado. Com uma cor so: centro a meia largura (a ultima medida) dela, para o lado onde essa cor esteve da ultima vez
+	s_verde, s_vermelho, p, k = ajuste
+	if s_verde is not None and s_vermelho is not None:
+		_estado['verde_esquerda'] = bool(s_verde > s_vermelho)
+		return ((s_verde + s_vermelho) / 2.0, p, k), abs(s_verde - s_vermelho) / np.sqrt(1.0 + p * p)
+	meia = _estado.get('largura', LARGURA_CORREDOR) / 2.0 * np.sqrt(1.0 + p * p)
+	verde_esquerda = _estado.get('verde_esquerda', True)
+	if s_verde is not None:
+		return (s_verde - meia if verde_esquerda else s_verde + meia, p, k), None
+	return (s_vermelho + meia if verde_esquerda else s_vermelho - meia, p, k), None
+
+def _atualiza_largura(largura):
+	if largura is not None and 0.4 < largura < 2.5:
+		_estado['largura'] = (1.0 - LARGURA_FILTRO) * _estado.get('largura', largura) + LARGURA_FILTRO * largura
+
+def mede_cones(img, prevista):
+	# (e, psi_e, c) do CENTRO do corredor no eixo dianteiro, ou None (mesmo contrato do mede_fita)
+	cones = detecta_cones(img)
+	_estado['desenho_cones'] = (cones, None)
+	x, y, verde = _cones_no_chao(cones)
+	ajuste = ajusta_corredor(x, y, verde, _circulo(*prevista)[2] if prevista is not None else 0.0)
+	if ajuste is None:
+		return None
+	arco, largura = _arco_do_meio(ajuste)
+	if largura is not None and not 0.4 < largura < 2.5:   # cone de outro corredor ou falso positivo: nao e o corredor
+		return None
+	e, psi, c = _no_eixo(*arco)
+	if abs(psi) > PSI_MAX_CONES:
+		return None
+	_atualiza_largura(largura)
+	_estado['desenho_cones'] = (cones, arco)
+	return float(e), float(psi), float(np.clip(c, -C_MAX, C_MAX))
+
+def mede_guia(img, prevista):
+	return mede_cones(img, prevista) if GUIA == 'cones' else mede_fita(img, prevista)
+
 def processa_quadro(img, t_quadro):
-	# mede a fita perto da prevista (ou do zero, se faz tempo que nao ve) e guarda em _estado['linha']
+	# mede a fita (ou o corredor) perto da prevista (ou do zero, se faz tempo que nao ve) e guarda em _estado['linha']
 	buscando = _estado.get('busca') is not None
 	recente = not buscando and _estado.get('visto') and _estado.get('sem_fita', 0.0) < D_SEM_FITA
-	medida = mede_fita(img, _estado.get('fita') if recente else None)
+	medida = mede_guia(img, _estado.get('fita') if recente else None)
 	if medida is not None and abs(medida[0]) > E_MAX_FITA:   # o RANSAC achou outra coisa amarela
 		medida = None
 	if medida is not None and buscando and not _medida_confiavel():
@@ -647,7 +869,7 @@ def _atualiza_busca(car):
 	modo = _estado.get('busca')
 	perdida = _fita_perdida(car)
 	if modo is None:
-		if not (BUSCA_ARCO or BUSCA_RE):
+		if GUIA != 'fita' or not (BUSCA_ARCO or BUSCA_RE):   # a busca (arco e re) foi feita para a fita; com cones so freia
 			return
 		if perdida and _estado.get('visto'):
 			_estado['d_seguindo'] = 0.0
@@ -725,18 +947,32 @@ def _texto_video(car):
 	idade = car.t - _estado['linha'][0]
 	return f"e {100 * e:+.1f} cm  psi {np.rad2deg(psi):+.1f}  st {np.rad2deg(car.st):+.1f}  v {car.v:.2f}  idade {idade:.2f} s"
 
+def _desenha_cones(vis, cones, arco, xs):
+	# caixa de cada cone (cor do cone) e o centro do corredor em magenta
+	for c in cones:
+		cor = COR_IGNORADO if c['cor'] == 'vermelho' else COR_USADO
+		v0, v1, u0, u1 = c['v0'], c['v0'] + c['altura'], c['u0'], c['u0'] + c['largura']
+		vis[[v0, v1 - 1], u0:u1] = cor
+		vis[v0:v1, [u0, u1 - 1]] = cor
+	if arco is not None:
+		_desenha_fita(vis, arco, xs)
+
 def quadro_visao(img, car):
 	import cv2   # o camera.py ja depende dele; os testes no PC nao
 	vis = img.copy()
 	altura = vis.shape[0]
-	vis[[int(altura * FAIXA_VISAO[0]), int(altura * FAIXA_VISAO[1]) - 1]] = COR_FAIXA
-	xs = np.arange(0.3, X_MAX_VISAO, 0.05)
+	xs = np.arange(0.3, X_MAX_CONES if GUIA == 'cones' else X_MAX_VISAO, 0.05)
 	_desenha_pontos(vis, xs, np.zeros(len(xs)), COR_EIXO)
-	uu, vv, perto, circ = _estado.get('desenho', (np.array([], int), np.array([], int), None, None))
-	vis[vv, uu] = COR_IGNORADO
-	if circ is not None:
-		vis[vv[perto], uu[perto]] = COR_USADO
-		_desenha_fita(vis, circ, xs)
+	if GUIA == 'cones':
+		vis[[CONE_LINHAS[0]]] = COR_FAIXA
+		_desenha_cones(vis, *_estado.get('desenho_cones', ([], None)), xs)
+	else:
+		vis[[int(altura * FAIXA_VISAO[0]), int(altura * FAIXA_VISAO[1]) - 1]] = COR_FAIXA
+		uu, vv, perto, circ = _estado.get('desenho', (np.array([], int), np.array([], int), None, None))
+		vis[vv, uu] = COR_IGNORADO
+		if circ is not None:
+			vis[vv[perto], uu[perto]] = COR_USADO
+			_desenha_fita(vis, circ, xs)
 	texto = _texto_video(car)
 	cv2.putText(vis, texto, (8, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 4)
 	cv2.putText(vis, texto, (8, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
@@ -846,7 +1082,7 @@ def _envia_telemetria(car):
 # CORRIDA
 ########################################
 def _imprime_configuracao():
-	print(f"V_REF {V_REF} m/s, {TEMPO_CORRIDA:.0f} s, PD + FF (KP {KP}, TD {TD}, TAU_VDES {TAU_VDES}, K_FF {K_FF}, TAU_FF {TAU_FF}), "
+	print(f"GUIA {GUIA}, V_REF {V_REF} m/s, {TEMPO_CORRIDA:.0f} s, PD + FF (KP {KP}, TD {TD}, TAU_VDES {TAU_VDES}, K_FF {K_FF}, TAU_FF {TAU_FF}), "
 	      f"Stanley (K {K_STANLEY}, K_SOFT {K_SOFT}, sinal {SINAL_DIRECAO:+.0f}, trim {TRIM_DIRECAO} graus), "
 	      f"acelerador max {ACELERADOR_MAX} graus, ADAS {'ligado' if ADAS_ON else 'DESLIGADO'}, "
 	      f"filtro {'relativo' if FILTRO_RELATIVO else 'saturacao'}, grava quadros {'sim' if GRAVA_QUADROS else 'nao'}, mp4 {'sim' if GRAVA_VIDEO else 'nao'}, "

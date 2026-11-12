@@ -38,6 +38,7 @@ def carrega():
 	m.H_CHAO = m.homografia_pinhole()
 	m.K_STANLEY, m.V_REF = 2.0, 1.0   # os limites abaixo valem para K 2 e 1 m/s, qualquer que seja a sintonia do main.py
 	m.K_SOFT, m.BUSCA_ARCO, m.BUSCA_RE = 0.3, False, False
+	m.GUIA = 'fita'
 	return m
 
 
@@ -248,7 +249,7 @@ def teste_modos():
 	import contextlib
 	saida = io.StringIO()
 	with contextlib.redirect_stdout(saida):
-		ns, pasta = roda_main(ADAS_ON='True', ACELERADOR_MAX='5.0')
+		ns, pasta = roda_main(ADAS_ON='True', ACELERADOR_MAX='5.0', GUIA="'fita'")
 		assert {'car.csv', 'sonar.csv', 'lateral.csv'} <= set(os.listdir(pasta)), 'corrida normal nao gravou os logs'
 		gravados = sorted(Path(pasta, 'quadros').glob('quadro_*.png*'))
 		assert 2 <= len(gravados) <= 3, f'esperava 2 ou 3 quadros em 1 s a 2 Hz, gravou {len(gravados)}'
@@ -263,11 +264,11 @@ def teste_modos():
 		assert _CarFalso.gravados and 0.0 <= min(_CarFalso.gravados) - 100.0 < 0.2 and max(_CarFalso.gravados) - 100.0 <= 1.1, \
 			'timestamps dos quadros do mp4 nao estao em tinit + car.t'
 		_CarFalso.camera_nova = False   # camera.py antigo: sem start_recording, a corrida tem que andar igual
-		ns2, pasta2 = roda_main()
+		ns2, pasta2 = roda_main(GUIA="'fita'")
 		_CarFalso.camera_nova = True
 		assert 'lateral.csv' in os.listdir(pasta2), 'sem gravacao de video a corrida nao gravou os logs'
 		_CarFalso.encoder_ok, _CarFalso.fita_ate = False, 0.5   # encoder zerado e fita some: so o tempo pode parar o carro
-		roda_main(TEMPO_CORRIDA='2.0', T_SEM_FITA='0.5', BUSCA_ARCO='False', BUSCA_RE='False')
+		roda_main(GUIA="'fita'", TEMPO_CORRIDA='2.0', T_SEM_FITA='0.5', BUSCA_ARCO='False', BUSCA_RE='False')
 		_CarFalso.encoder_ok, _CarFalso.fita_ate = True, 1e9
 		assert _CarFalso.ultimo.u == -1.0, 'fita perdida com encoder zerado nao freou'
 	print("4. main.py com Car falso: corrida grava os logs, le a fita a +3 cm e esterca para a esquerda; teto do acelerador aplicado; "

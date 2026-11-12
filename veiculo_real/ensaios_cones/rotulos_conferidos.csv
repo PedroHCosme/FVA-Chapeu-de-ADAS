@@ -1,0 +1,16 @@
+quadro,TP,FP,FN,observacao
+quadro_000.009,10,0,2,"1 caixa larga ainda junta 2 verdes; vermelho pequeno perdido a x~487"
+quadro_003.388,13,0,1,"vermelho pequeno perdido a x~462"
+quadro_004.978,15,0,0,
+quadro_007.098,13,2,0,"2 FP: manchas verdes no chao em (278,185)"
+quadro_009.219,9,0,0,"separou os 2 vermelhos"
+quadro_010.253,5,0,0,
+quadro_012.372,4,0,0,
+b_quadro_008.049,9,0,2,"cluster de vermelhos pequenos a x~430 perdido; 2 vermelhos pequenos novos"
+b_quadro_010.670,8,0,2,"1 caixa ainda junta 2 verdes; 1 vermelho distante perdido"
+b_quadro_011.717,6,0,2,"1 caixa junta 3 verdes que se sobrepõem na imagem"
+b_quadro_013.805,4,0,1,"cluster de vermelhos separado em 2 caixas; pode haver mais 1 cone junto"
+b_quadro_015.362,1,0,1,"cone cortado na borda esquerda"
+b_quadro_016.916,3,0,0,
+b_quadro_018.457,3,0,0,"caixa verde na borda esquerda incerta; reflexo estende o cone vermelho"
+b_quadro_018.969,3,0,0,"caixas verdes incertas (objetos escuros pequenos)"
